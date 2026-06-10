@@ -52,7 +52,10 @@
  */
 #if defined (CLOCK_PROCESS_CPUTIME_ID) && defined(PNG_STDIO_SUPPORTED) &&\
     defined(PNG_EASY_ACCESS_SUPPORTED) &&\
-    (PNG_LIBPNG_VER >= 10700 ? defined(PNG_READ_PNG_SUPPORTED) :\
+    (PNG_LIBPNG_VER >= 10800 ?\
+     defined (PNG_SEQUENTIAL_READ_SUPPORTED) &&\
+     defined(PNG_INFO_IMAGE_SUPPORTED) :\
+     PNG_LIBPNG_VER >= 10700 ? defined(PNG_READ_PNG_SUPPORTED) :\
      defined (PNG_SEQUENTIAL_READ_SUPPORTED) &&\
      defined(PNG_INFO_IMAGE_SUPPORTED))
 
@@ -84,7 +87,7 @@ static void read_by_row(png_struct *png_ptr, png_info *info_ptr,
    /* These don't get freed on error, this is fine; the program immediately
     * exits.
     */
-   png_byte *row = NULL, display = NULL;
+   png_byte *row = NULL, *display = NULL;
    io_data io_copy;
 
    if (write_ptr != NULL)

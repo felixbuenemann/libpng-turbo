@@ -528,7 +528,7 @@ generate_row(png_byte *row, size_t rowbytes, unsigned int y, int color_type,
       }
    }
 
-   else switch (channels_of_type(color_type))
+   else if (colors[0] == 0) switch (channels_of_type(color_type))
    {
    /* 1 channel: a square image with a diamond, the least luminous colors are on
     *    the edge of the image, the most luminous in the center.
