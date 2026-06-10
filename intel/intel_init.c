@@ -46,3 +46,148 @@ png_init_filter_functions_sse2(png_struct *pp, unsigned int bpp)
 }
 
 #define png_target_init_filter_functions_impl png_init_filter_functions_sse2
+
+#ifdef PNG_TARGET_STORES_DATA
+/*    png_target_free_data_impl
+ *       Must be defined if the implementation stores data in
+ *       png_struct::target_data.  Need not be defined otherwise.
+ */
+static void
+png_target_free_data_sse2(png_struct *pp)
+{
+   void *ptr = pp->target_data;
+   pp->target_data = NULL;
+   png_free(pp, ptr);
+}
+#define png_target_free_data_impl png_target_free_data_sse2
+#endif /* TARGET_STORES_DATA */
+
+#ifdef PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
+/*    png_target_do_expand_palette_impl   [flag: png_target_expand_palette]
+ *       static function
+ *       OPTIONAL
+ *       Handles the transform.  Need not be defined, only called if the
+ *       state contains png_target_<transform>, may set this flag to zero, may
+ *       return false to indicate that the transform was not done (so the
+ *       C implementation must then execute).
+ */
+#include "palette_sse2_intrinsics.c"
+
+static int
+png_target_do_expand_palette_sse2(png_struct *png_ptr, png_row_info *row_info,
+    png_byte *row, const png_color *palette, const png_byte *trans_alpha,
+    int num_trans)
+{
+   /* NOTE: it is important that this is done. row_info->width is not a CSE
+    * because the pointer is not declared with the 'restrict' parameter, this
+    * makes it a CSE but then it is very important that no one changes it in
+    * this function, hence the const.
+    */
+   const png_uint_32 row_width = row_info->width;
+
+   /* This follows the structure of png_target_do_expand_palette_neon in
+    * arm/arm_init.c; see the comments there.  The one difference: both the
+    * RGBA and the RGB expansions use the "riffled" palette, because reading
+    * RGBA8 entries with aligned 32-bit loads is the fastest way to gather
+    * palette entries with SSE (and it cannot over-read the 768 byte RGB
+    * palette on the last entry).
+    */
+   if (row_info->color_type == PNG_COLOR_TYPE_PALETTE &&
+       row_info->bit_depth == 8 /* <8 requires a bigger "riffled" palette */)
+   {
+      const png_byte *sp = row + (row_width - 1); /* 8 bit palette index */
+
+      /* The riffled palette is initialized here, on demand. */
+      if (png_ptr->target_data == NULL)
+      {
+         /* The data is allocated using png_malloc_warn so the code
+          * does not error out on OOM.
+          */
+         png_ptr->target_data = png_malloc_warn(png_ptr, 256 * 4);
+
+         /* On allocation error it is essential to clear the flag or a
+          * massive number of warnings will be output.
+          */
+         if (png_ptr->target_data != NULL)
+            png_riffle_palette_sse2(png_ptr->target_data, palette,
+                  trans_alpha, num_trans);
+         else
+            goto clear_flag;
+      }
+
+      if (num_trans > 0)
+      {
+         /* This is the general convention in the core transform code; when
+          * expanding the number of bytes in the row copy down (necessary) and
+          * pass a pointer to the last byte, not the first.
+          */
+         png_byte *dp = row + (4/*RGBA*/*row_width - 1);
+
+         png_uint_32 i = png_target_do_expand_palette_rgba8_sse2(
+               png_ptr->target_data, row_width, &sp, &dp);
+
+         if (i == 0) /* nothing was done */
+            return 0; /* Return here: interlaced images start out narrow */
+
+         /* Now 'i' may not have reached row_width.
+          * NOTE: [i] is not the index into the row buffer, rather it is
+          * [row_width-i], this is the way it is done in the original
+          * png_do_expand_palette.
+          */
+         for (; i < row_width; i++)
+         {
+            if ((int)(*sp) >= num_trans)
+               *dp-- = 0xff;
+            else
+               *dp-- = trans_alpha[*sp];
+            *dp-- = palette[*sp].blue;
+            *dp-- = palette[*sp].green;
+            *dp-- = palette[*sp].red;
+            sp--;
+         }
+
+         /* Finally update row_info to reflect the expanded output: */
+         row_info->bit_depth = 8;
+         row_info->pixel_depth = 32;
+         row_info->rowbytes = (size_t)row_width * 4;
+         row_info->color_type = 6;
+         row_info->channels = 4;
+         return 1;
+      }
+      else
+      {
+         /* No tRNS chunk (num_trans == 0), expand to RGB not RGBA. */
+         png_byte *dp = row + (3/*RGB*/ * (size_t)row_width - 1);
+
+         png_uint_32 i = png_target_do_expand_palette_rgb8_sse2(
+               png_ptr->target_data, row_width, &sp, &dp);
+
+         if (i == 0)
+            return 0; /* Return here: interlaced images start out narrow */
+
+         /* Finish the last bytes: */
+         for (; i < row_width; i++)
+         {
+            *dp-- = palette[*sp].blue;
+            *dp-- = palette[*sp].green;
+            *dp-- = palette[*sp].red;
+            sp--;
+         }
+
+         row_info->bit_depth = 8;
+         row_info->pixel_depth = 24;
+         row_info->rowbytes = (size_t)row_width * 3;
+         row_info->color_type = 2;
+         row_info->channels = 3;
+         return 1;
+      }
+   }
+
+clear_flag:
+   /* Here on malloc failure and on an inapplicable image. */
+   png_ptr->target_state &= ~png_target_expand_palette;
+   return 0;
+}
+
+#define png_target_do_expand_palette_impl png_target_do_expand_palette_sse2
+#endif /* TARGET_IMPLEMENTS_EXPAND_PALETTE */
