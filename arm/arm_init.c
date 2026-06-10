@@ -195,9 +195,30 @@ png_target_do_expand_palette_neon(png_struct *png_ptr, png_row_info *row_info,
       {
          /* No tRNS chunk (num_trans == 0), expand to RGB not RGBA. */
          png_byte *dp = row + (3/*RGB*/ * (size_t)row_width - 1);
+         png_uint_32 i;
 
-         png_uint_32 i = png_target_do_expand_palette_rgb8_neon(palette,
+#ifdef PNG_ARM_RIFFLED_PALETTE_RGB8
+         /* This expansion reads the palette as 32-bit RGBx entries, so it
+          * needs the "riffled" palette too; initialize it on demand exactly
+          * as in the RGBA case above (the alpha bytes are never read).
+          */
+         if (png_ptr->target_data == NULL)
+         {
+            png_ptr->target_data = png_malloc_warn(png_ptr, 256 * 4);
+
+            if (png_ptr->target_data != NULL)
+               png_riffle_palette_neon(png_ptr->target_data, palette,
+                     trans_alpha, num_trans);
+            else
+               goto clear_flag;
+         }
+
+         i = png_target_do_expand_palette_rgb8_neon(png_ptr->target_data,
                row_info->width, &sp, &dp);
+#else /* big-endian: gather directly from the 3-byte RGB palette */
+         i = png_target_do_expand_palette_rgb8_neon(palette,
+               row_info->width, &sp, &dp);
+#endif /* PNG_ARM_RIFFLED_PALETTE_RGB8 */
 
          if (i == 0)
             return 0; /* Return here: interlaced images start out narrow */

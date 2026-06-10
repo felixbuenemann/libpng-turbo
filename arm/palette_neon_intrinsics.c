@@ -84,6 +84,64 @@ png_target_do_expand_palette_rgba8_neon(const png_uint_32 *riffled_palette,
    return i;
 }
 
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) &&\
+   __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+/* Use the "riffled" palette for the RGB8 expansion as well; gathering the
+ * RGBx entries with 32-bit loads and repacking them into three 32-bit words
+ * with scalar shifts is measurably faster than gathering 3-byte entries
+ * with vld3_lane (which has a long load-use latency into vector registers).
+ * The repacking relies on a little-endian byte order.
+ */
+#define PNG_ARM_RIFFLED_PALETTE_RGB8 1
+
+static png_uint_32
+png_target_do_expand_palette_rgb8_neon(const png_uint_32 *riffled_palette,
+    png_uint_32 row_width, const png_byte **ssp, png_byte **ddp)
+{
+   const png_uint_32 pixels_per_chunk = 4;
+   png_uint_32 i;
+
+   png_debug(1, "in png_do_expand_palette_rgb8_neon");
+
+   if (row_width < pixels_per_chunk)
+      return 0;
+
+   /* Seeking this back by 4 pixels x 3 bytes. */
+   *ddp = *ddp - (pixels_per_chunk * 3 - 1);
+
+   for (i = 0; i + pixels_per_chunk <= row_width; i += pixels_per_chunk)
+   {
+      const png_byte *sp = *ssp - i;
+      png_byte *dp = *ddp - i * 3;
+      png_uint_32 e0 = riffled_palette[*(sp - 3)];
+      png_uint_32 e1 = riffled_palette[*(sp - 2)];
+      png_uint_32 e2 = riffled_palette[*(sp - 1)];
+      png_uint_32 e3 = riffled_palette[*(sp - 0)];
+
+      /* Each entry has the byte layout [R,G,B,x]; produce the 12 output
+       * bytes R0 G0 B0 R1 G1 B1 R2 G2 B2 R3 G3 B3 as three little-endian
+       * 32-bit words.
+       */
+      png_uint_32 w0 = (e0 & 0xffffffU) | (e1 << 24);
+      png_uint_32 w1 = ((e1 >> 8) & 0xffffU) | (e2 << 16);
+      png_uint_32 w2 = ((e2 >> 16) & 0xffU) | (e3 << 8);
+
+      memcpy(dp, &w0, 4);
+      memcpy(dp + 4, &w1, 4);
+      memcpy(dp + 8, &w2, 4);
+   }
+
+   /* Undo the pre-adjustment of *ddp before the pointer handoff,
+    * so the scalar fallback in pngrtran.c receives a dp that points
+    * to the correct position.
+    */
+   *ddp = *ddp + (pixels_per_chunk * 3 - 1);
+   *ssp = *ssp - i;
+   *ddp = *ddp - i * 3;
+   return i;
+}
+
+#else /* big-endian */
 /* Expands a palettized row into RGB8. */
 static png_uint_32
 png_target_do_expand_palette_rgb8_neon(const png_color *paletteIn,
@@ -128,3 +186,4 @@ png_target_do_expand_palette_rgb8_neon(const png_color *paletteIn,
    *ddp = *ddp - i * 3;
    return i;
 }
+#endif /* big-endian */
