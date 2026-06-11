@@ -63,6 +63,27 @@ png_init_filter_functions_sse2(png_struct *pp, unsigned int bpp)
 
 #define png_target_init_filter_functions_impl png_init_filter_functions_sse2
 
+#ifdef PNG_TARGET_IMPLEMENTS_WRITE_FILTERS
+#include "write_filter_sse2_intrinsics.c"
+
+static void
+png_init_write_filter_functions_sse2(png_struct *pp)
+{
+   png_debug(1, "in png_init_write_filter_functions_sse2");
+
+   /* The write filter trials have no inter-pixel dependences, so these
+    * handle every pixel size; 'bpp' is only a load offset.
+    */
+   pp->write_filter[PNG_FILTER_VALUE_SUB-1] = png_setup_sub_row_sse2;
+   pp->write_filter[PNG_FILTER_VALUE_UP-1] = png_setup_up_row_sse2;
+   pp->write_filter[PNG_FILTER_VALUE_AVG-1] = png_setup_avg_row_sse2;
+   pp->write_filter[PNG_FILTER_VALUE_PAETH-1] = png_setup_paeth_row_sse2;
+}
+
+#define png_target_init_write_filter_functions_impl \
+   png_init_write_filter_functions_sse2
+#endif /* TARGET_IMPLEMENTS_WRITE_FILTERS */
+
 #ifdef PNG_TARGET_STORES_DATA
 /*    png_target_free_data_impl
  *       Must be defined if the implementation stores data in

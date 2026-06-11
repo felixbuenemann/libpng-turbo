@@ -453,6 +453,16 @@ struct png_struct_def
    void (*read_filter[PNG_FILTER_VALUE_LAST-1])(png_row_info *row_info,
       png_byte *row, const png_byte *prev_row);
 
+#ifdef PNG_WRITE_FILTER_SUPPORTED
+/* [[libpng-1.8]] The write filter trial functions: each filters the row
+ * into png_struct::try_row and returns the "minimum sum of absolute
+ * differences" score, abandoning early (with a sum exceeding lmins) when
+ * the candidate is already worse than the best row so far.
+ */
+   size_t (*write_filter[PNG_FILTER_VALUE_LAST-1])(png_struct *png_ptr,
+      png_uint_32 bpp, size_t row_bytes, size_t lmins);
+#endif
+
 /* NOTE: prior to libpng-1.8 this also checked that PNG_ARM_NEON_IMPLEMENTATION
  * is defined, however it was always defined...  The code also checked that
  * READ_EXPAND is supported but that will lead to bugs when some hardware

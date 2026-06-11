@@ -33,5 +33,7 @@
 #     define PNG_TARGET_STORES_DATA
 #     define PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
 #  endif /* READ_EXPAND */
+   /* pngtarget.h removes this if PNG_WRITE_FILTER_SUPPORTED is not set: */
+#  define PNG_TARGET_IMPLEMENTS_WRITE_FILTERS
 #  define PNG_TARGET_ROW_ALIGNMENT 16
 #endif /* PNG_INTEL_SSE_IMPLEMENTATION > 0 */

@@ -575,6 +575,16 @@ png_create_write_struct_2,(const char *user_png_ver, void *error_ptr,
 #endif /* USER_MEM */
    if (png_ptr != NULL)
    {
+#     ifdef PNG_TARGET_IMPLEMENTS_WRITE_FILTERS
+         /* This mirrors the read struct creation in pngread.c; the write
+          * side currently only uses target specific code for the filter
+          * selection (png_struct::write_filter).
+          */
+         png_target_init(png_ptr);
+         if (png_ptr->target_state != 0U)
+            png_set_option(png_ptr, PNG_TARGET_SPECIFIC_CODE, 1);
+#     endif
+
       /* Set the zlib control values to defaults; they can be overridden by the
        * application after the struct has been created.
        */

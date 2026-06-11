@@ -77,6 +77,12 @@
       setting
 #endif
 
+#if defined(PNG_TARGET_IMPLEMENTS_WRITE_FILTERS) !=\
+    defined(png_target_init_write_filter_functions_impl)
+#  error TARGET SPECIFIC CODE: png_target_init_write_filter_functions_impl\
+      unexpected setting
+#endif
+
 void
 png_target_init(png_struct *pp)
 {
@@ -91,9 +97,15 @@ png_target_init(png_struct *pp)
 #  else
 #     define PNG_TARGET_EXPAND_PALETTE_SUPPORT 0U
 #  endif
+#  ifdef png_target_init_write_filter_functions_impl
+#     define PNG_TARGET_WRITE_FILTER_SUPPORT png_target_write_filters
+#  else
+#     define PNG_TARGET_WRITE_FILTER_SUPPORT 0U
+#  endif
 
 #  define PNG_TARGET_SUPPORT (PNG_TARGET_FILTER_SUPPORT |\
-                              PNG_TARGET_EXPAND_PALETTE_SUPPORT)
+                              PNG_TARGET_EXPAND_PALETTE_SUPPORT |\
+                              PNG_TARGET_WRITE_FILTER_SUPPORT)
 
 #  if PNG_TARGET_SUPPORT != 0U
       pp->target_state = PNG_TARGET_SUPPORT;
@@ -126,6 +138,16 @@ png_target_init_filter_functions(png_struct *pp, unsigned int bpp)
       png_target_init_filter_functions_impl(pp, bpp);
 }
 #endif /* filters */
+
+#ifdef PNG_TARGET_IMPLEMENTS_WRITE_FILTERS
+void
+png_target_init_write_filter_functions(png_struct *pp)
+{
+   if (((pp->options >> PNG_TARGET_SPECIFIC_CODE) & 3) == PNG_OPTION_ON &&
+       (pp->target_state & png_target_write_filters) != 0)
+      png_target_init_write_filter_functions_impl(pp);
+}
+#endif /* write filters */
 
 #ifdef PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
 int

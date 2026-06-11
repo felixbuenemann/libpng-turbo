@@ -90,6 +90,9 @@
 #ifndef PNG_READ_EXPAND_SUPPORTED
 #  undef PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE
 #endif
+#ifndef PNG_WRITE_FILTER_SUPPORTED
+#  undef PNG_TARGET_IMPLEMENTS_WRITE_FILTERS
+#endif
 
 /* Now check the condition above.  Note that these checks consider the composite
  * result of all the above includes; if errors are preceded by warnings about
@@ -98,7 +101,8 @@
 #ifdef PNG_TARGET_CODE_IMPLEMENTATION /* There is target-specific code */
 /* List all the supported target specific code types here: */
 #  if !defined(PNG_TARGET_IMPLEMENTS_FILTERS) &&\
-      !defined(PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE)
+      !defined(PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE) &&\
+      !defined(PNG_TARGET_IMPLEMENTS_WRITE_FILTERS)
 #  error PNG_TARGET_CODE_IMPLEMENTATION without any implementations.
 
 /* Currently only row alignments which are a power of 2 and less than 17 are
@@ -118,7 +122,8 @@
 #  if defined(PNG_TARGET_STORES_DATA) ||\
       defined(PNG_TARGET_ROW_ALIGNMENT) ||\
       defined(PNG_TARGET_IMPLEMENTS_FILTERS) ||\
-      defined(PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE)
+      defined(PNG_TARGET_IMPLEMENTS_EXPAND_PALETTE) ||\
+      defined(PNG_TARGET_IMPLEMENTS_WRITE_FILTERS)
 #     error PNG_TARGET_ macro defined without target specfic code.
 #  endif /* Check PNG_TARGET_ macros are not defined. */
 #endif /* PNG_TARGET_CODE_IMPLEMENTATION */

@@ -1313,6 +1313,8 @@ PNG_INTERNAL_FUNCTION(void, png_read_filter_row,
  */
 #define png_target_filters 1 /* MASK: hardware support for filters */
 #define png_target_expand_palette 2 /* MASK: hardware support for palettes */
+#define png_target_write_filters 4 /* MASK: hardware support for write
+                                    * filter selection */
 
 PNG_INTERNAL_FUNCTION(void, png_target_init,
    (png_struct *),
@@ -1331,6 +1333,18 @@ PNG_INTERNAL_FUNCTION(void, png_target_init_filter_functions,
    /* The filter function initializer that selects the specific hardware
     * implementation.  Called once before the first row needs to be defiltered.
     */
+
+#ifdef PNG_TARGET_IMPLEMENTS_WRITE_FILTERS
+PNG_INTERNAL_FUNCTION(void, png_target_init_write_filter_functions,
+   (png_struct *png_ptr),
+   PNG_EMPTY);
+   /* As above, but for the write-side filter trial functions stored in
+    * png_struct::write_filter.  Called once before the first row is
+    * filtered.  The trial functions handle every pixel size (the write
+    * filters have no inter-pixel dependences, so the pixel size is only a
+    * load offset).
+    */
+#endif /* TARGET_IMPLEMENTS_WRITE_FILTERS */
 
 /* Handlers for specific transforms (currently only 'expand_palette').  These
  * are implemented in pngsimd.c to call the actual SIMD implementation if

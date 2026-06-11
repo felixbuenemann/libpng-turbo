@@ -2458,12 +2458,15 @@ png_setup_sub_row_only(png_struct *png_ptr, png_uint_32 bpp,
 }
 
 static size_t /* PRIVATE */
-png_setup_up_row(png_struct *png_ptr, size_t row_bytes, size_t lmins)
+png_setup_up_row(png_struct *png_ptr, png_uint_32 bpp,
+    size_t row_bytes, size_t lmins)
 {
    png_byte *rp, *dp, *pp;
    size_t i;
    size_t sum = 0;
    unsigned int v;
+
+   PNG_UNUSED(bpp) /* the up filter does not use the pixel to the left */
 
    png_ptr->try_row[0] = PNG_FILTER_VALUE_UP;
 
@@ -2673,6 +2676,25 @@ png_setup_paeth_row_only(png_struct *png_ptr, png_uint_32 bpp,
       *dp++ = (png_byte)(((int)*rp++ - p) & 0xff);
    }
 }
+
+static void /* PRIVATE */
+png_init_write_filter_functions(png_struct *pp)
+   /* This is called once for every PNG image whose write filter mask
+    * contains more than one filter, to select the implementations of the
+    * filter trial functions.  Unlike the read filters the trial functions
+    * handle every pixel size, so the selection does not depend on the
+    * image format.
+    */
+{
+   pp->write_filter[PNG_FILTER_VALUE_SUB-1] = png_setup_sub_row;
+   pp->write_filter[PNG_FILTER_VALUE_UP-1] = png_setup_up_row;
+   pp->write_filter[PNG_FILTER_VALUE_AVG-1] = png_setup_avg_row;
+   pp->write_filter[PNG_FILTER_VALUE_PAETH-1] = png_setup_paeth_row;
+
+#  ifdef PNG_TARGET_IMPLEMENTS_WRITE_FILTERS
+      png_target_init_write_filter_functions(pp);
+#  endif
+}
 #endif /* WRITE_FILTER */
 
 void /* PRIVATE */
@@ -2696,6 +2718,9 @@ png_write_find_filter(png_struct *png_ptr, png_row_info *row_info)
    row_buf = png_ptr->row_buf;
    mins = PNG_SIZE_MAX - 256/* so we can detect potential overflow of the
                                running sum */;
+
+   if (png_ptr->write_filter[0] == NULL)
+      png_init_write_filter_functions(png_ptr);
 
    /* The prediction method we use is to find which method provides the
     * smallest value when summing the absolute values of the distances
@@ -2775,7 +2800,8 @@ png_write_find_filter(png_struct *png_ptr, png_row_info *row_info)
       size_t sum;
       size_t lmins = mins;
 
-      sum = png_setup_sub_row(png_ptr, bpp, row_bytes, lmins);
+      sum = png_ptr->write_filter[PNG_FILTER_VALUE_SUB-1](png_ptr, bpp,
+          row_bytes, lmins);
 
       if (sum < mins)
       {
@@ -2801,7 +2827,8 @@ png_write_find_filter(png_struct *png_ptr, png_row_info *row_info)
       size_t sum;
       size_t lmins = mins;
 
-      sum = png_setup_up_row(png_ptr, row_bytes, lmins);
+      sum = png_ptr->write_filter[PNG_FILTER_VALUE_UP-1](png_ptr, bpp,
+          row_bytes, lmins);
 
       if (sum < mins)
       {
@@ -2827,7 +2854,8 @@ png_write_find_filter(png_struct *png_ptr, png_row_info *row_info)
       size_t sum;
       size_t lmins = mins;
 
-      sum= png_setup_avg_row(png_ptr, bpp, row_bytes, lmins);
+      sum = png_ptr->write_filter[PNG_FILTER_VALUE_AVG-1](png_ptr, bpp,
+          row_bytes, lmins);
 
       if (sum < mins)
       {
@@ -2853,7 +2881,8 @@ png_write_find_filter(png_struct *png_ptr, png_row_info *row_info)
       size_t sum;
       size_t lmins = mins;
 
-      sum = png_setup_paeth_row(png_ptr, bpp, row_bytes, lmins);
+      sum = png_ptr->write_filter[PNG_FILTER_VALUE_PAETH-1](png_ptr, bpp,
+          row_bytes, lmins);
 
       if (sum < mins)
       {
