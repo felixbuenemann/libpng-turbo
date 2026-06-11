@@ -163,9 +163,23 @@ png_target_do_expand_palette_neon(png_struct *png_ptr, png_row_info *row_info,
     *    no changes have been made to the original ARM code at this point.
     */
    if (row_info->color_type == PNG_COLOR_TYPE_PALETTE &&
-       row_info->bit_depth == 8 /* <8 requires a bigger "riffled" palette */)
+       row_info->bit_depth <= 8)
    {
       const png_byte *sp = row + (row_width - 1); /* 8 bit palette index */
+
+      if (row_info->bit_depth < 8)
+      {
+         /* Expand the packed 1, 2 or 4 bit indices to 8 bits first; this
+          * also updates row_info so that, should one of the expansions
+          * below leave the work to the C implementation (narrow interlaced
+          * rows), png_do_expand_palette skips its own unpack phase.
+          */
+         png_target_expand_bits_neon(row, row_width, row_info->bit_depth);
+         row_info->bit_depth = 8;
+         row_info->pixel_depth = 8;
+         row_info->rowbytes = row_width;
+      }
+
       if (num_trans > 0)
       {
          /* This case needs a "riffled" palette.  In this implementation the

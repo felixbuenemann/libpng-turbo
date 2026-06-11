@@ -31,6 +31,96 @@ png_riffle_palette_sse2(png_byte *riffled_palette, const png_color *palette,
    }
 }
 
+/* Expand a 1, 2 or 4 bit packed indexed row in place to 8 bit indices,
+ * mirroring the bit_depth < 8 phase of png_do_expand_palette.
+ *
+ * The expansion works from the end of the row backwards so that no packed
+ * byte is overwritten before it has been read.  The trailing pixels (a
+ * partial vector chunk, including any partial trailing byte) are expanded
+ * with the scalar loop; whole chunks of 8 packed bytes are expanded with
+ * cascaded shift/mask/interleave stages, each stage splitting every byte
+ * into its high and low halves (the leftmost pixel is in the high bits).
+ */
+static void
+png_target_expand_bits_sse2(png_byte *row, png_uint_32 row_width,
+    unsigned int bit_depth)
+{
+   /* Pixels per 8-byte chunk: 16, 32 or 64. */
+   const png_uint_32 pixels_per_chunk = 64U / bit_depth;
+   const unsigned int mask = (1U << bit_depth) - 1U;
+   png_uint_32 simd_px = row_width - (row_width % pixels_per_chunk);
+   png_uint_32 i;
+
+   png_debug(1, "in png_target_expand_bits_sse2");
+
+   /* Scalar tail: pixels [simd_px, row_width), written backwards. */
+   for (i = row_width; i > simd_px; )
+   {
+      unsigned int sbyte, shift;
+      --i;
+      sbyte = row[(i * bit_depth) >> 3];
+      shift = (8U - bit_depth) - ((i * bit_depth) & 7U);
+      row[i] = (png_byte)((sbyte >> shift) & mask);
+   }
+
+   /* Whole chunks, highest first. */
+   for (i = simd_px; i > 0; )
+   {
+      const png_byte *sp;
+      png_byte *dp;
+
+      i -= pixels_per_chunk;
+      sp = row + ((i * bit_depth) >> 3);
+      dp = row + i;
+
+      if (bit_depth == 4)
+      {
+         __m128i x = load8(sp);
+         __m128i nib = _mm_set1_epi8(0x0f);
+         __m128i hi = _mm_and_si128(_mm_srli_epi16(x, 4), nib);
+         __m128i lo = _mm_and_si128(x, nib);
+         _mm_storeu_si128((__m128i *)dp, _mm_unpacklo_epi8(hi, lo));
+      }
+
+      else if (bit_depth == 2)
+      {
+         __m128i x = load8(sp);
+         __m128i nib = _mm_set1_epi8(0x0f);
+         __m128i two = _mm_set1_epi8(0x03);
+         __m128i q = _mm_unpacklo_epi8(
+             _mm_and_si128(_mm_srli_epi16(x, 4), nib),
+             _mm_and_si128(x, nib));
+         __m128i hi = _mm_and_si128(_mm_srli_epi16(q, 2), two);
+         __m128i lo = _mm_and_si128(q, two);
+         _mm_storeu_si128((__m128i *)dp, _mm_unpacklo_epi8(hi, lo));
+         _mm_storeu_si128((__m128i *)(dp + 16), _mm_unpackhi_epi8(hi, lo));
+      }
+
+      else /* bit_depth == 1 */
+      {
+         __m128i x = load8(sp);
+         __m128i nib = _mm_set1_epi8(0x0f);
+         __m128i two = _mm_set1_epi8(0x03);
+         __m128i one = _mm_set1_epi8(0x01);
+         __m128i q = _mm_unpacklo_epi8(
+             _mm_and_si128(_mm_srli_epi16(x, 4), nib),
+             _mm_and_si128(x, nib));
+         __m128i hi = _mm_and_si128(_mm_srli_epi16(q, 2), two);
+         __m128i lo = _mm_and_si128(q, two);
+         __m128i p0 = _mm_unpacklo_epi8(hi, lo);
+         __m128i p1 = _mm_unpackhi_epi8(hi, lo);
+         hi = _mm_and_si128(_mm_srli_epi16(p0, 1), one);
+         lo = _mm_and_si128(p0, one);
+         _mm_storeu_si128((__m128i *)dp, _mm_unpacklo_epi8(hi, lo));
+         _mm_storeu_si128((__m128i *)(dp + 16), _mm_unpackhi_epi8(hi, lo));
+         hi = _mm_and_si128(_mm_srli_epi16(p1, 1), one);
+         lo = _mm_and_si128(p1, one);
+         _mm_storeu_si128((__m128i *)(dp + 32), _mm_unpacklo_epi8(hi, lo));
+         _mm_storeu_si128((__m128i *)(dp + 48), _mm_unpackhi_epi8(hi, lo));
+      }
+   }
+}
+
 /* Expands a palettized row into RGBA8. */
 static png_uint_32
 png_target_do_expand_palette_rgba8_sse2(const png_uint_32 *riffled_palette,

@@ -43,6 +43,86 @@ png_riffle_palette_neon(png_byte *riffled_palette, const png_color *palette,
       riffled_palette[i * 4 + 3] = trans_alpha[i];
 }
 
+/* Expand a 1, 2 or 4 bit packed indexed row in place to 8 bit indices,
+ * mirroring the bit_depth < 8 phase of png_do_expand_palette.
+ *
+ * The expansion works from the end of the row backwards so that no packed
+ * byte is overwritten before it has been read.  The trailing pixels (a
+ * partial vector chunk, including any partial trailing byte) are expanded
+ * with the scalar loop; whole chunks of 8 packed bytes are expanded with
+ * cascaded shift/mask/interleave stages, each stage splitting every byte
+ * into its high and low halves (the leftmost pixel is in the high bits).
+ */
+static void
+png_target_expand_bits_neon(png_byte *row, png_uint_32 row_width,
+    unsigned int bit_depth)
+{
+   /* Pixels per 8-byte chunk: 16, 32 or 64. */
+   const png_uint_32 pixels_per_chunk = 64U / bit_depth;
+   const unsigned int mask = (1U << bit_depth) - 1U;
+   png_uint_32 simd_px = row_width - (row_width % pixels_per_chunk);
+   png_uint_32 i;
+
+   png_debug(1, "in png_target_expand_bits_neon");
+
+   /* Scalar tail: pixels [simd_px, row_width), written backwards. */
+   for (i = row_width; i > simd_px; )
+   {
+      unsigned int sbyte, shift;
+      --i;
+      sbyte = row[(i * bit_depth) >> 3];
+      shift = (8U - bit_depth) - ((i * bit_depth) & 7U);
+      row[i] = (png_byte)((sbyte >> shift) & mask);
+   }
+
+   /* Whole chunks, highest first. */
+   for (i = simd_px; i > 0; )
+   {
+      const png_byte *sp;
+      png_byte *dp;
+
+      i -= pixels_per_chunk;
+      sp = row + ((i * bit_depth) >> 3);
+      dp = row + i;
+
+      if (bit_depth == 4)
+      {
+         uint8x8_t x = vld1_u8(sp);
+         uint8x8x2_t z;
+         z.val[0] = vshr_n_u8(x, 4);
+         z.val[1] = vand_u8(x, vdup_n_u8(0x0f));
+         vst2_u8(dp, z);
+      }
+
+      else if (bit_depth == 2)
+      {
+         uint8x8_t x = vld1_u8(sp);
+         uint8x8x2_t n = vzip_u8(vshr_n_u8(x, 4), vand_u8(x, vdup_n_u8(0x0f)));
+         uint8x16_t q = vcombine_u8(n.val[0], n.val[1]);
+         uint8x16x2_t z;
+         z.val[0] = vshrq_n_u8(q, 2);
+         z.val[1] = vandq_u8(q, vdupq_n_u8(0x03));
+         vst2q_u8(dp, z);
+      }
+
+      else /* bit_depth == 1 */
+      {
+         uint8x8_t x = vld1_u8(sp);
+         uint8x8x2_t n = vzip_u8(vshr_n_u8(x, 4), vand_u8(x, vdup_n_u8(0x0f)));
+         uint8x16_t q = vcombine_u8(n.val[0], n.val[1]);
+         uint8x16x2_t p = vzipq_u8(vshrq_n_u8(q, 2),
+             vandq_u8(q, vdupq_n_u8(0x03)));
+         uint8x16x2_t z;
+         z.val[0] = vshrq_n_u8(p.val[0], 1);
+         z.val[1] = vandq_u8(p.val[0], vdupq_n_u8(0x01));
+         vst2q_u8(dp, z);
+         z.val[0] = vshrq_n_u8(p.val[1], 1);
+         z.val[1] = vandq_u8(p.val[1], vdupq_n_u8(0x01));
+         vst2q_u8(dp + 32, z);
+      }
+   }
+}
+
 /* Expands a palettized row into RGBA8. */
 static png_uint_32
 png_target_do_expand_palette_rgba8_neon(const png_uint_32 *riffled_palette,
