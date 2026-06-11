@@ -170,6 +170,62 @@ png_read_filter_row_sub2_sse2(png_row_info *row_info, png_byte *row,
    PNG_UNUSED(prev)
 }
 
+static __m128i
+load2(const void *p)
+{
+   int tmp = 0;
+   memcpy(&tmp, p, 2);
+   return _mm_cvtsi32_si128(tmp);
+}
+
+static void
+store2(void *p, __m128i v)
+{
+   int tmp = _mm_cvtsi128_si32(v);
+   memcpy(p, &tmp, 2);
+}
+
+/* bpp 2 (8-bit gray+alpha and 16-bit gray) versions of the avg and paeth
+ * filters.  NOTE: under Rosetta 2 translation these measure slightly slower
+ * than the (bpp-specialized) C implementations because the serial
+ * dependency chain of translated SSE instructions runs at roughly half its
+ * native speed; on genuine x86 cores the llvm-mca models (Skylake, Zen 3)
+ * put them at 1.5-2x faster than the C loops, whose recurrence runs through
+ * a store-to-load round trip.
+ */
+static void
+png_read_filter_row_avg2_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   size_t rb;
+   const __m128i zero = _mm_setzero_si128();
+   const __m128i ones = _mm_set1_epi8(1);
+   __m128i b;
+   __m128i a, d = zero;
+
+   png_debug(1, "in png_read_filter_row_avg2_sse2");
+
+   rb = row_info->rowbytes+2;
+   while (rb > 2) {
+      __m128i avg;
+             b = load2(prev);
+      a = d; d = load2(row );
+
+      /* PNG requires a truncating average, so we can't just use _mm_avg_epu8 */
+      avg = _mm_avg_epu8(a,b);
+      /* ...but we can fix it up by subtracting off 1 if it rounded up. */
+      avg = _mm_sub_epi8(avg, _mm_and_si128(_mm_xor_si128(a,b),
+                                            ones));
+
+      d = _mm_add_epi8(d, avg);
+      store2(row, d);
+
+      prev += 2;
+      row  += 2;
+      rb   -= 2;
+   }
+}
+
 static void
 png_read_filter_row_sub3_sse2(png_row_info *row_info, png_byte *row,
     const png_byte *prev)
@@ -657,6 +713,56 @@ png_read_filter_row_paeth4_sse2(png_row_info *row_info, png_byte *row,
       prev += 4;
       row  += 4;
       rb   -= 4;
+   }
+}
+
+static void
+png_read_filter_row_paeth2_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   /* Same as png_read_filter_row_paeth4_sse2 above with a 2 byte pixel;
+    * see the comments there and above png_read_filter_row_avg2_sse2.
+    */
+   size_t rb;
+   const __m128i zero = _mm_setzero_si128();
+   __m128i pa,pb,pc,smallest,nearest;
+   __m128i c, b = zero,
+           a, d = zero;
+
+   png_debug(1, "in png_read_filter_row_paeth2_sse2");
+
+   rb = row_info->rowbytes+2;
+   while (rb > 2) {
+      c = b; b = _mm_unpacklo_epi8(load2(prev), zero);
+      a = d; d = _mm_unpacklo_epi8(load2(row ), zero);
+
+      /* (p-a) == (a+b-c - a) == (b-c) */
+      pa = _mm_sub_epi16(b,c);
+
+      /* (p-b) == (a+b-c - b) == (a-c) */
+      pb = _mm_sub_epi16(a,c);
+
+      /* (p-c) == (a+b-c - c) == (a+b-c-c) == (b-c)+(a-c) */
+      pc = _mm_add_epi16(pa,pb);
+
+      pa = abs_i16(pa);  /* |p-a| */
+      pb = abs_i16(pb);  /* |p-b| */
+      pc = abs_i16(pc);  /* |p-c| */
+
+      smallest = _mm_min_epi16(pc, _mm_min_epi16(pa, pb));
+
+      /* Paeth breaks ties favoring a over b over c. */
+      nearest  = if_then_else(_mm_cmpeq_epi16(smallest, pa), a,
+                 if_then_else(_mm_cmpeq_epi16(smallest, pb), b,
+                                                             c));
+
+      /* Note `_epi8`: we need addition to wrap modulo 255. */
+      d = _mm_add_epi8(d, nearest);
+      store2(row, _mm_packus_epi16(d,d));
+
+      prev += 2;
+      row  += 2;
+      rb   -= 2;
    }
 }
 
