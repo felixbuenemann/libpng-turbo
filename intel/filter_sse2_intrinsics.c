@@ -49,6 +49,40 @@ store3(void *p, __m128i v)
    memcpy(p, &tmp, 3);
 }
 
+static __m128i
+load8(const void *p)
+{
+   /* This is an unaligned 8 byte load, despite the type of the argument. */
+   return _mm_loadl_epi64((const __m128i *)p);
+}
+
+static void
+store8(void *p, __m128i v)
+{
+   _mm_storel_epi64((__m128i *)p, v);
+}
+
+static __m128i
+load6(const void *p)
+{
+   const png_byte *pb = (const png_byte *)p;
+   png_uint_32 tmp32 = 0;
+   int tmp16 = 0;
+   memcpy(&tmp32, pb, 4);
+   memcpy(&tmp16, pb + 4, 2);
+   return _mm_insert_epi16(_mm_cvtsi32_si128((int)tmp32), tmp16, 2);
+}
+
+static void
+store6(void *p, __m128i v)
+{
+   png_byte *pb = (png_byte *)p;
+   int tmp32 = _mm_cvtsi128_si32(v);
+   int tmp16 = _mm_extract_epi16(v, 2);
+   memcpy(pb, &tmp32, 4);
+   memcpy(pb + 4, &tmp16, 2);
+}
+
 static void
 png_read_filter_row_sub3_sse2(png_row_info *row_info, png_byte *row,
     const png_byte *prev)
@@ -199,6 +233,148 @@ png_read_filter_row_avg4_sse2(png_row_info *row_info, png_byte *row,
       prev += 4;
       row  += 4;
       rb   -= 4;
+   }
+}
+
+/* The following are the 16-bit pixel analogues of the 8-bit pixel filters
+ * above: bpp 6 is 16-bit RGB and bpp 8 is 16-bit RGBA.  The arithmetic is
+ * identical because PNG filters are defined on bytes, only the pixel stride
+ * changes.  For bpp 6 the loads read 8 bytes (the row buffers have at least
+ * 16 bytes of padding, and the two extra bytes only ever land in lanes which
+ * do not affect the 6 stored bytes - all operations are lane-wise), while
+ * the stores write exactly 6 bytes so that the next pixel's filtered input
+ * is not overwritten.
+ */
+static void
+png_read_filter_row_sub6_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   size_t rb;
+
+   __m128i a, d = _mm_setzero_si128();
+
+   png_debug(1, "in png_read_filter_row_sub6_sse2");
+
+   rb = row_info->rowbytes;
+   while (rb >= 8) {
+      a = d; d = load8(row);
+      d = _mm_add_epi8(d, a);
+      store6(row, d);
+
+      row += 6;
+      rb  -= 6;
+   }
+   if (rb > 0) {
+      a = d; d = load6(row);
+      d = _mm_add_epi8(d, a);
+      store6(row, d);
+
+      row += 6;
+      rb  -= 6;
+   }
+   PNG_UNUSED(prev)
+}
+
+static void
+png_read_filter_row_sub8_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   size_t rb;
+
+   __m128i a, d = _mm_setzero_si128();
+
+   png_debug(1, "in png_read_filter_row_sub8_sse2");
+
+   rb = row_info->rowbytes+8;
+   while (rb > 8) {
+      a = d; d = load8(row);
+      d = _mm_add_epi8(d, a);
+      store8(row, d);
+
+      row += 8;
+      rb  -= 8;
+   }
+   PNG_UNUSED(prev)
+}
+
+static void
+png_read_filter_row_avg6_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   size_t rb;
+
+   const __m128i zero = _mm_setzero_si128();
+
+   __m128i b;
+   __m128i a, d = zero;
+
+   png_debug(1, "in png_read_filter_row_avg6_sse2");
+
+   rb = row_info->rowbytes;
+   while (rb >= 8) {
+      __m128i avg;
+             b = load8(prev);
+      a = d; d = load8(row );
+
+      /* PNG requires a truncating average, so we can't just use _mm_avg_epu8 */
+      avg = _mm_avg_epu8(a,b);
+      /* ...but we can fix it up by subtracting off 1 if it rounded up. */
+      avg = _mm_sub_epi8(avg, _mm_and_si128(_mm_xor_si128(a,b),
+                                            _mm_set1_epi8(1)));
+      d = _mm_add_epi8(d, avg);
+      store6(row, d);
+
+      prev += 6;
+      row  += 6;
+      rb   -= 6;
+   }
+   if (rb > 0) {
+      __m128i avg;
+             b = load6(prev);
+      a = d; d = load6(row );
+
+      avg = _mm_avg_epu8(a,b);
+      avg = _mm_sub_epi8(avg, _mm_and_si128(_mm_xor_si128(a,b),
+                                            _mm_set1_epi8(1)));
+
+      d = _mm_add_epi8(d, avg);
+      store6(row, d);
+
+      prev += 6;
+      row  += 6;
+      rb   -= 6;
+   }
+}
+
+static void
+png_read_filter_row_avg8_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   size_t rb;
+   const __m128i zero = _mm_setzero_si128();
+   __m128i b;
+   __m128i a, d = zero;
+
+   png_debug(1, "in png_read_filter_row_avg8_sse2");
+
+   rb = row_info->rowbytes+8;
+   while (rb > 8) {
+      __m128i avg;
+             b = load8(prev);
+      a = d; d = load8(row );
+
+      /* PNG requires a truncating average, so we can't just use _mm_avg_epu8 */
+      avg = _mm_avg_epu8(a,b);
+      /* ...but we can fix it up by subtracting off 1 if it rounded up. */
+      avg = _mm_sub_epi8(avg, _mm_and_si128(_mm_xor_si128(a,b),
+                                            _mm_set1_epi8(1)));
+
+      d = _mm_add_epi8(d, avg);
+      store8(row, d);
+
+      prev += 8;
+      row  += 8;
+      rb   -= 8;
    }
 }
 
@@ -394,5 +570,133 @@ png_read_filter_row_paeth4_sse2(png_row_info *row_info, png_byte *row,
       prev += 4;
       row  += 4;
       rb   -= 4;
+   }
+}
+
+static void
+png_read_filter_row_paeth6_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   /* This is the bpp 6 (16-bit RGB) version of png_read_filter_row_paeth3_sse2
+    * above; see the comments there and at the top of the bpp 6/8 filter
+    * section.  A 6 byte pixel fills 6 of the 8 available 16-bit lanes.
+    */
+   size_t rb;
+   const __m128i zero = _mm_setzero_si128();
+   __m128i c, b = zero,
+           a, d = zero;
+
+   png_debug(1, "in png_read_filter_row_paeth6_sse2");
+
+   rb = row_info->rowbytes;
+   while (rb >= 8) {
+      __m128i pa,pb,pc,smallest,nearest;
+      c = b; b = _mm_unpacklo_epi8(load8(prev), zero);
+      a = d; d = _mm_unpacklo_epi8(load8(row ), zero);
+
+      /* (p-a) == (a+b-c - a) == (b-c) */
+      pa = _mm_sub_epi16(b,c);
+
+      /* (p-b) == (a+b-c - b) == (a-c) */
+      pb = _mm_sub_epi16(a,c);
+
+      /* (p-c) == (a+b-c - c) == (a+b-c-c) == (b-c)+(a-c) */
+      pc = _mm_add_epi16(pa,pb);
+
+      pa = abs_i16(pa);  /* |p-a| */
+      pb = abs_i16(pb);  /* |p-b| */
+      pc = abs_i16(pc);  /* |p-c| */
+
+      smallest = _mm_min_epi16(pc, _mm_min_epi16(pa, pb));
+
+      /* Paeth breaks ties favoring a over b over c. */
+      nearest  = if_then_else(_mm_cmpeq_epi16(smallest, pa), a,
+                 if_then_else(_mm_cmpeq_epi16(smallest, pb), b,
+                                                             c));
+
+      /* Note `_epi8`: we need addition to wrap modulo 255. */
+      d = _mm_add_epi8(d, nearest);
+      store6(row, _mm_packus_epi16(d,d));
+
+      prev += 6;
+      row  += 6;
+      rb   -= 6;
+   }
+   if (rb > 0) {
+      __m128i pa,pb,pc,smallest,nearest;
+      c = b; b = _mm_unpacklo_epi8(load6(prev), zero);
+      a = d; d = _mm_unpacklo_epi8(load6(row ), zero);
+
+      pa = _mm_sub_epi16(b,c);
+      pb = _mm_sub_epi16(a,c);
+      pc = _mm_add_epi16(pa,pb);
+
+      pa = abs_i16(pa);
+      pb = abs_i16(pb);
+      pc = abs_i16(pc);
+
+      smallest = _mm_min_epi16(pc, _mm_min_epi16(pa, pb));
+
+      nearest  = if_then_else(_mm_cmpeq_epi16(smallest, pa), a,
+                 if_then_else(_mm_cmpeq_epi16(smallest, pb), b,
+                                                             c));
+
+      d = _mm_add_epi8(d, nearest);
+      store6(row, _mm_packus_epi16(d,d));
+
+      prev += 6;
+      row  += 6;
+      rb   -= 6;
+   }
+}
+
+static void
+png_read_filter_row_paeth8_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   /* This is the bpp 8 (16-bit RGBA) version of
+    * png_read_filter_row_paeth4_sse2 above; an 8 byte pixel exactly fills
+    * the 8 available 16-bit lanes.
+    */
+   size_t rb;
+   const __m128i zero = _mm_setzero_si128();
+   __m128i pa,pb,pc,smallest,nearest;
+   __m128i c, b = zero,
+           a, d = zero;
+
+   png_debug(1, "in png_read_filter_row_paeth8_sse2");
+
+   rb = row_info->rowbytes+8;
+   while (rb > 8) {
+      c = b; b = _mm_unpacklo_epi8(load8(prev), zero);
+      a = d; d = _mm_unpacklo_epi8(load8(row ), zero);
+
+      /* (p-a) == (a+b-c - a) == (b-c) */
+      pa = _mm_sub_epi16(b,c);
+
+      /* (p-b) == (a+b-c - b) == (a-c) */
+      pb = _mm_sub_epi16(a,c);
+
+      /* (p-c) == (a+b-c - c) == (a+b-c-c) == (b-c)+(a-c) */
+      pc = _mm_add_epi16(pa,pb);
+
+      pa = abs_i16(pa);  /* |p-a| */
+      pb = abs_i16(pb);  /* |p-b| */
+      pc = abs_i16(pc);  /* |p-c| */
+
+      smallest = _mm_min_epi16(pc, _mm_min_epi16(pa, pb));
+
+      /* Paeth breaks ties favoring a over b over c. */
+      nearest  = if_then_else(_mm_cmpeq_epi16(smallest, pa), a,
+                 if_then_else(_mm_cmpeq_epi16(smallest, pb), b,
+                                                             c));
+
+      /* Note `_epi8`: we need addition to wrap modulo 255. */
+      d = _mm_add_epi8(d, nearest);
+      store8(row, _mm_packus_epi16(d,d));
+
+      prev += 8;
+      row  += 8;
+      rb   -= 8;
    }
 }

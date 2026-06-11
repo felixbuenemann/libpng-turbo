@@ -40,6 +40,22 @@ png_init_filter_functions_sse2(png_struct *pp, unsigned int bpp)
           png_read_filter_row_paeth4_sse2;
    }
 
+   else if (bpp == 6)
+   {
+      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub6_sse2;
+      pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg6_sse2;
+      pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+          png_read_filter_row_paeth6_sse2;
+   }
+
+   else if (bpp == 8)
+   {
+      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub8_sse2;
+      pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg8_sse2;
+      pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+          png_read_filter_row_paeth8_sse2;
+   }
+
    /* No need optimize PNG_FILTER_VALUE_UP.  The compiler should
     * autovectorize.
     */

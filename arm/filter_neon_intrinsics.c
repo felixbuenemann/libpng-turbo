@@ -338,6 +338,164 @@ png_read_filter_row_paeth3_neon(png_row_info *row_info, png_byte *row,
    }
 }
 
+/* The following are the 16-bit pixel analogues of the 8-bit pixel filters
+ * above: bpp 6 is 16-bit RGB and bpp 8 is 16-bit RGBA.  The arithmetic is
+ * identical because PNG filters are defined on bytes, only the pixel stride
+ * changes.  These process one pixel per iteration: the serial dependency on
+ * the previous pixel allows no useful inter-pixel parallelism, but a whole
+ * pixel per vector operation still beats the byte-at-a-time C code.
+ *
+ * For bpp 6 the 8 byte loads read 2 bytes beyond the pixel (the row buffers
+ * have at least 16 bytes of padding, and the extra bytes only ever land in
+ * lanes which do not affect the 6 stored bytes - all operations are
+ * lane-wise), while the stores write exactly 6 bytes so that the next
+ * pixel's filtered input is not overwritten.
+ */
+static void
+store6(png_byte *rp, uint8x8_t vdest)
+{
+   vst1_lane_u32(png_ptr(uint32_t,rp), vreinterpret_u32_u8(vdest), 0);
+   vst1_lane_u16(png_ptr(uint16_t,rp + 4), vreinterpret_u16_u8(vdest), 2);
+}
+
+static void
+png_read_filter_row_sub6_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_sub6_neon");
+
+   for (; rp < rp_stop; rp += 6)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      vdest = vadd_u8(vdest, vrp);
+      store6(rp, vdest);
+   }
+
+   PNG_UNUSED(prev_row)
+}
+
+static void
+png_read_filter_row_sub8_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_sub8_neon");
+
+   for (; rp < rp_stop; rp += 8)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      vdest = vadd_u8(vdest, vrp);
+      vst1_u8(rp, vdest);
+   }
+
+   PNG_UNUSED(prev_row)
+}
+
+static void
+png_read_filter_row_avg6_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+   const png_byte *pp = prev_row;
+
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_avg6_neon");
+
+   for (; rp < rp_stop; rp += 6, pp += 6)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      uint8x8_t vpp = vld1_u8(pp);
+
+      vdest = vhadd_u8(vdest, vpp);
+      vdest = vadd_u8(vdest, vrp);
+      store6(rp, vdest);
+   }
+}
+
+static void
+png_read_filter_row_avg8_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+   const png_byte *pp = prev_row;
+
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_avg8_neon");
+
+   for (; rp < rp_stop; rp += 8, pp += 8)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      uint8x8_t vpp = vld1_u8(pp);
+
+      vdest = vhadd_u8(vdest, vpp);
+      vdest = vadd_u8(vdest, vrp);
+      vst1_u8(rp, vdest);
+   }
+}
+
+static void
+png_read_filter_row_paeth6_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+   const png_byte *pp = prev_row;
+
+   uint8x8_t vlast = vdup_n_u8(0);
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_paeth6_neon");
+
+   for (; rp < rp_stop; rp += 6, pp += 6)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      uint8x8_t vpp = vld1_u8(pp);
+
+      vdest = paeth(vdest, vpp, vlast);
+      vdest = vadd_u8(vdest, vrp);
+      vlast = vpp;
+      store6(rp, vdest);
+   }
+}
+
+static void
+png_read_filter_row_paeth8_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+   const png_byte *pp = prev_row;
+
+   uint8x8_t vlast = vdup_n_u8(0);
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_paeth8_neon");
+
+   for (; rp < rp_stop; rp += 8, pp += 8)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      uint8x8_t vpp = vld1_u8(pp);
+
+      vdest = paeth(vdest, vpp, vlast);
+      vdest = vadd_u8(vdest, vrp);
+      vlast = vpp;
+      vst1_u8(rp, vdest);
+   }
+}
+
 static void
 png_read_filter_row_paeth4_neon(png_row_info *row_info, png_byte *row,
     const png_byte *prev_row)

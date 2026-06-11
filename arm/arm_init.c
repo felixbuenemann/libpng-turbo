@@ -47,6 +47,22 @@ png_init_filter_functions_neon(png_struct *pp, unsigned int bpp)
       pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
           png_read_filter_row_paeth4_neon;
    }
+
+   else if (bpp == 6)
+   {
+      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub6_neon;
+      pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg6_neon;
+      pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+          png_read_filter_row_paeth6_neon;
+   }
+
+   else if (bpp == 8)
+   {
+      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub8_neon;
+      pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg8_neon;
+      pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+          png_read_filter_row_paeth8_neon;
+   }
 }
 
 #define png_target_init_filter_functions_impl png_init_filter_functions_neon
