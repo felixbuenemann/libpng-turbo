@@ -860,6 +860,11 @@ png_read_destroy(png_struct *png_ptr)
    png_free(png_ptr, png_ptr->read_buffer);
    png_ptr->read_buffer = NULL;
 
+#ifdef PNG_USE_LIBDEFLATE /* PROTOTYPE */
+   png_free(png_ptr, png_ptr->ld_buf);
+   png_ptr->ld_buf = NULL;
+#endif
+
 #ifdef PNG_READ_QUANTIZE_SUPPORTED
    png_free(png_ptr, png_ptr->palette_lookup);
    png_ptr->palette_lookup = NULL;

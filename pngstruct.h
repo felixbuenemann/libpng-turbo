@@ -475,5 +475,14 @@ struct png_struct_def
 #  endif
    png_uint_32 target_state; /* managed by libpng */
 #endif
+
+#ifdef PNG_USE_LIBDEFLATE /* PROTOTYPE: whole-IDAT decode via libdeflate */
+   png_byte *ld_buf;             /* whole decompressed image data, or NULL */
+   png_alloc_size_t ld_size;     /* total bytes in ld_buf */
+   png_alloc_size_t ld_pos;      /* bytes already handed out */
+   int ld_state;                 /* 0=untried 1=active 2=failed/ineligible */
+   int ld_stashed;               /* a chunk header was read ahead */
+   png_byte ld_stash[8];         /* the read-ahead chunk header */
+#endif
 };
 #endif /* PNGSTRUCT_H */

@@ -187,6 +187,20 @@ int main(void) { return 0; }
   [AC_MSG_RESULT([too old or ZLIB_VERNUM not defined])
    AC_MSG_ERROR([zlib version 1.2.8 or later is required])])
 
+# Optional: use libdeflate for whole-image IDAT decompression in the
+# sequential reader (faster, but buffers the whole image; see pngrutil.c).
+AC_ARG_WITH(libdeflate,
+   AS_HELP_STRING([[[--with-libdeflate]]],
+      [use libdeflate for sequential-read IDAT decompression]),
+      [use_libdeflate=${withval}],
+      [use_libdeflate=no])
+AS_IF([test "x$use_libdeflate" != "xno"],
+  [AC_CHECK_HEADER([libdeflate.h], ,
+     [AC_MSG_ERROR([--with-libdeflate: libdeflate.h not found])])
+   AC_CHECK_LIB([deflate], [libdeflate_zlib_decompress_ex], ,
+     [AC_MSG_ERROR([--with-libdeflate: libdeflate (1.10+) not found])])
+   CPPFLAGS="$CPPFLAGS -DPNG_USE_LIBDEFLATE"])
+
 # The following is for pngvalid, to ensure it catches FP errors even on
 # platforms that don't enable FP exceptions, the function appears in the math
 # library (typically), it's not an error if it is not found.

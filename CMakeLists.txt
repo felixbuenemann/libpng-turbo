@@ -141,6 +141,21 @@ endif()
 find_package(ZLIB REQUIRED)
 set(PNG_LINK_LIBRARIES ZLIB::ZLIB)
 
+option(PNG_LIBDEFLATE
+       "Use libdeflate for whole-image IDAT decompression in the sequential\
+ reader (faster, but buffers the whole image; see pngrutil.c)" OFF)
+if(PNG_LIBDEFLATE)
+  find_path(LIBDEFLATE_INCLUDE_DIR NAMES libdeflate.h)
+  find_library(LIBDEFLATE_LIBRARY NAMES deflate libdeflate)
+  if(NOT LIBDEFLATE_INCLUDE_DIR OR NOT LIBDEFLATE_LIBRARY)
+    message(FATAL_ERROR "PNG_LIBDEFLATE: libdeflate not found; set "
+                        "LIBDEFLATE_INCLUDE_DIR and LIBDEFLATE_LIBRARY")
+  endif()
+  add_definitions(-DPNG_USE_LIBDEFLATE)
+  include_directories(${LIBDEFLATE_INCLUDE_DIR})
+  list(APPEND PNG_LINK_LIBRARIES ${LIBDEFLATE_LIBRARY})
+endif()
+
 # Find the math library (unless we already know it's not available or
 # not needed).
 if(UNIX AND NOT (APPLE OR BEOS OR HAIKU OR EMSCRIPTEN))
