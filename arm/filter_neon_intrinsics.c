@@ -54,6 +54,86 @@ png_read_filter_row_up_neon(png_row_info *row_info, png_byte *row,
    }
 }
 
+/* The sub filter recurrence is associative (byte addition modulo 256), so
+ * for small pixels it can be computed as a within-vector prefix sum with
+ * log2(16) shift-and-add steps plus a broadcast carry from the previous
+ * block, processing 16 bytes per iteration; this is an order of magnitude
+ * faster than the byte-serial loop for bpp 1 and 2.
+ */
+static void
+png_read_filter_row_sub1_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+
+   uint8x16_t vzero = vdupq_n_u8(0);
+   uint8x16_t vcarry = vzero;
+
+   png_debug(1, "in png_read_filter_row_sub1_neon");
+
+   for (; rp + 16 <= rp_stop; rp += 16)
+   {
+      uint8x16_t x = vld1q_u8(rp);
+      x = vaddq_u8(x, vextq_u8(vzero, x, 15));
+      x = vaddq_u8(x, vextq_u8(vzero, x, 14));
+      x = vaddq_u8(x, vextq_u8(vzero, x, 12));
+      x = vaddq_u8(x, vextq_u8(vzero, x, 8));
+      x = vaddq_u8(x, vcarry);
+      vst1q_u8(rp, x);
+      vcarry = vdupq_lane_u8(vget_high_u8(x), 7);
+   }
+
+   /* The first byte of the row is unfiltered; the scalar tail must not
+    * touch it (rp[-1] would be the filter byte).
+    */
+   if (rp == row && rp < rp_stop)
+      rp++;
+
+   for (; rp < rp_stop; rp++)
+      *rp = (png_byte)(*rp + rp[-1]);
+
+   PNG_UNUSED(prev_row)
+}
+
+static void
+png_read_filter_row_sub2_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row + 2; /* the first pixel is unfiltered */
+   png_byte *rp_stop = row + row_info->rowbytes;
+
+   uint8x16_t vzero = vdupq_n_u8(0);
+   uint16x8_t vcarry;
+
+   png_debug(1, "in png_read_filter_row_sub2_neon");
+
+   {
+      /* Seed the carry with the (unfiltered) first pixel; the 8 byte load
+       * is endian-safe and cannot over-read because the row buffers have
+       * at least 16 bytes of padding.
+       */
+      uint8x8_t seed = vld1_u8(row);
+      vcarry = vdupq_lane_u16(vreinterpret_u16_u8(seed), 0);
+   }
+
+   for (; rp + 16 <= rp_stop; rp += 16)
+   {
+      uint8x16_t x = vld1q_u8(rp);
+      x = vaddq_u8(x, vextq_u8(vzero, x, 14));
+      x = vaddq_u8(x, vextq_u8(vzero, x, 12));
+      x = vaddq_u8(x, vextq_u8(vzero, x, 8));
+      x = vaddq_u8(x, vreinterpretq_u8_u16(vcarry));
+      vst1q_u8(rp, x);
+      vcarry = vdupq_lane_u16(vget_high_u16(vreinterpretq_u16_u8(x)), 3);
+   }
+
+   for (; rp < rp_stop; rp++)
+      *rp = (png_byte)(*rp + rp[-2]);
+
+   PNG_UNUSED(prev_row)
+}
+
 static void
 png_read_filter_row_sub3_neon(png_row_info *row_info, png_byte *row,
     const png_byte *prev_row)
@@ -356,6 +436,66 @@ store6(png_byte *rp, uint8x8_t vdest)
 {
    vst1_lane_u32(png_ptr(uint32_t,rp), vreinterpret_u32_u8(vdest), 0);
    vst1_lane_u16(png_ptr(uint16_t,rp + 4), vreinterpret_u16_u8(vdest), 2);
+}
+
+static void
+store2(png_byte *rp, uint8x8_t vdest)
+{
+   vst1_lane_u16(png_ptr(uint16_t,rp), vreinterpret_u16_u8(vdest), 0);
+}
+
+/* bpp 2 (8-bit gray+alpha and 16-bit gray) versions of the avg and paeth
+ * filters; the same lane-wise safety argument as for bpp 6 applies to the
+ * overshooting 8 byte loads.  (The bpp 2 sub filter uses the prefix-sum
+ * implementation above, and these are measurably faster than the C code
+ * only on NEON, so the SSE2 implementation does not have them.)
+ */
+static void
+png_read_filter_row_avg2_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+   const png_byte *pp = prev_row;
+
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_avg2_neon");
+
+   for (; rp < rp_stop; rp += 2, pp += 2)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      uint8x8_t vpp = vld1_u8(pp);
+
+      vdest = vhadd_u8(vdest, vpp);
+      vdest = vadd_u8(vdest, vrp);
+      store2(rp, vdest);
+   }
+}
+
+static void
+png_read_filter_row_paeth2_neon(png_row_info *row_info, png_byte *row,
+    const png_byte *prev_row)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+   const png_byte *pp = prev_row;
+
+   uint8x8_t vlast = vdup_n_u8(0);
+   uint8x8_t vdest = vdup_n_u8(0);
+
+   png_debug(1, "in png_read_filter_row_paeth2_neon");
+
+   for (; rp < rp_stop; rp += 2, pp += 2)
+   {
+      uint8x8_t vrp = vld1_u8(rp);
+      uint8x8_t vpp = vld1_u8(pp);
+
+      vdest = paeth(vdest, vpp, vlast);
+      vdest = vadd_u8(vdest, vrp);
+      vlast = vpp;
+      store2(rp, vdest);
+   }
 }
 
 static void

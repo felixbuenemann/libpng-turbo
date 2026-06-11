@@ -25,7 +25,17 @@ png_init_filter_functions_sse2(png_struct *pp, unsigned int bpp)
     * but they end up a bit slower than using the equally-ubiquitous SSE2.
    */
    png_debug(1, "in png_init_filter_functions_sse2");
-   if (bpp == 3)
+   if (bpp == 1 || bpp == 2)
+   {
+      /* Only the prefix-sum sub filter beats the (bpp-specialized,
+       * auto-vectorized) C code at these pixel sizes on x86; serial
+       * avg/paeth kernels measured slower or equal.
+       */
+      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = bpp == 1 ?
+         png_read_filter_row_sub1_sse2 : png_read_filter_row_sub2_sse2;
+   }
+
+   else if (bpp == 3)
    {
       pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub3_sse2;
       pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg3_sse2;

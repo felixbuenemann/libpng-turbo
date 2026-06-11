@@ -83,6 +83,93 @@ store6(void *p, __m128i v)
    memcpy(pb + 4, &tmp16, 2);
 }
 
+/* The sub filter recurrence is associative (byte addition modulo 256), so
+ * for small pixels it can be computed as a within-vector prefix sum with
+ * log2(16) shift-and-add steps plus a broadcast carry from the previous
+ * block, processing 16 bytes per iteration; this is an order of magnitude
+ * faster than the byte-serial loop for bpp 1 and clearly faster for bpp 2.
+ */
+static void
+png_read_filter_row_sub1_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   png_byte *rp = row;
+   png_byte *rp_stop = row + row_info->rowbytes;
+
+   __m128i carry = _mm_setzero_si128();
+
+   png_debug(1, "in png_read_filter_row_sub1_sse2");
+
+   for (; rp + 16 <= rp_stop; rp += 16)
+   {
+      __m128i x = _mm_loadu_si128((const __m128i *)rp);
+      __m128i t;
+      x = _mm_add_epi8(x, _mm_slli_si128(x, 1));
+      x = _mm_add_epi8(x, _mm_slli_si128(x, 2));
+      x = _mm_add_epi8(x, _mm_slli_si128(x, 4));
+      x = _mm_add_epi8(x, _mm_slli_si128(x, 8));
+      x = _mm_add_epi8(x, carry);
+      _mm_storeu_si128((__m128i *)rp, x);
+
+      /* Broadcast the last byte into every lane of the carry. */
+      t = _mm_srli_si128(x, 15);
+      t = _mm_unpacklo_epi8(t, t);
+      t = _mm_shufflelo_epi16(t, 0);
+      carry = _mm_shuffle_epi32(t, 0);
+   }
+
+   /* The first byte of the row is unfiltered; the scalar tail must not
+    * touch it (rp[-1] would be the filter byte).
+    */
+   if (rp == row && rp < rp_stop)
+      rp++;
+
+   for (; rp < rp_stop; rp++)
+      *rp = (png_byte)(*rp + rp[-1]);
+
+   PNG_UNUSED(prev)
+}
+
+static void
+png_read_filter_row_sub2_sse2(png_row_info *row_info, png_byte *row,
+    const png_byte *prev)
+{
+   png_byte *rp = row + 2; /* the first pixel is unfiltered */
+   png_byte *rp_stop = row + row_info->rowbytes;
+
+   __m128i carry;
+
+   png_debug(1, "in png_read_filter_row_sub2_sse2");
+
+   {
+      /* Seed the carry with the (unfiltered) first pixel. */
+      int first = 0;
+      memcpy(&first, row, 2);
+      first |= first << 16;
+      carry = _mm_shuffle_epi32(_mm_cvtsi32_si128(first), 0);
+   }
+
+   for (; rp + 16 <= rp_stop; rp += 16)
+   {
+      __m128i x = _mm_loadu_si128((const __m128i *)rp);
+      __m128i t;
+      x = _mm_add_epi8(x, _mm_slli_si128(x, 2));
+      x = _mm_add_epi8(x, _mm_slli_si128(x, 4));
+      x = _mm_add_epi8(x, _mm_slli_si128(x, 8));
+      x = _mm_add_epi8(x, carry);
+      _mm_storeu_si128((__m128i *)rp, x);
+
+      /* Broadcast the last two bytes into every 16-bit lane of the carry. */
+      t = _mm_shufflehi_epi16(x, 0xFF);
+      carry = _mm_shuffle_epi32(t, 0xEE);
+   }
+
+   for (; rp < rp_stop; rp++)
+      *rp = (png_byte)(*rp + rp[-2]);
+
+   PNG_UNUSED(prev)
+}
+
 static void
 png_read_filter_row_sub3_sse2(png_row_info *row_info, png_byte *row,
     const png_byte *prev)

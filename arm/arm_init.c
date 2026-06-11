@@ -32,7 +32,23 @@ png_init_filter_functions_neon(png_struct *pp, unsigned int bpp)
     */
    pp->read_filter[PNG_FILTER_VALUE_UP-1] = png_read_filter_row_up_neon;
 
-   if (bpp == 3)
+   if (bpp == 1)
+   {
+      /* Only the prefix-sum sub filter beats the C code at this pixel
+       * size (paeth has a specialized 1-byte C implementation).
+       */
+      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub1_neon;
+   }
+
+   else if (bpp == 2)
+   {
+      pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub2_neon;
+      pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg2_neon;
+      pp->read_filter[PNG_FILTER_VALUE_PAETH-1] =
+          png_read_filter_row_paeth2_neon;
+   }
+
+   else if (bpp == 3)
    {
       pp->read_filter[PNG_FILTER_VALUE_SUB-1] = png_read_filter_row_sub3_neon;
       pp->read_filter[PNG_FILTER_VALUE_AVG-1] = png_read_filter_row_avg3_neon;
