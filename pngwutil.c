@@ -2376,6 +2376,26 @@ png_write_filtered_row(png_struct *png_ptr, png_byte *filtered_row,
     size_t row_bytes);
 
 #ifdef PNG_WRITE_FILTER_SUPPORTED
+/* The candidate rows are scored with the "minimum sum of absolute
+ * differences" heuristic (see png_write_find_filter below); a candidate is
+ * abandoned as soon as its running sum exceeds the best sum so far (lmins).
+ *
+ * The scoring loops below accumulate the sum over fixed-size chunks and
+ * test for abandonment between chunks rather than after every byte.  This
+ * changes neither the selected filter nor the output (any sum > lmins is
+ * rejected no matter by how much), but it removes the data-dependent exit
+ * from the inner loops, which allows the compiler to vectorize them.  The
+ * chunk sum also fits in 'unsigned int' (the per-byte score is at most
+ * 128), giving the vectorizer a cheaper reduction than the full size_t.
+ */
+#define PNG_FILTER_SCORE_CHUNK 256U
+
+#ifdef PNG_USE_ABS
+#  define png_filter_score(v) (128 - abs((int)(v) - 128))
+#else
+#  define png_filter_score(v) ((v) < 128 ? (v) : 256 - (v))
+#endif
+
 static size_t /* PRIVATE */
 png_setup_sub_row(png_struct *png_ptr, png_uint_32 bpp,
     size_t row_bytes, size_t lmins)
@@ -2391,22 +2411,22 @@ png_setup_sub_row(png_struct *png_ptr, png_uint_32 bpp,
         i++, rp++, dp++)
    {
       v = *dp = *rp;
-#ifdef PNG_USE_ABS
-      sum += 128 - abs((int)v - 128);
-#else
-      sum += (v < 128) ? v : 256 - v;
-#endif
+      sum += png_filter_score(v);
    }
 
-   for (lp = png_ptr->row_buf + 1; i < row_bytes;
-      i++, rp++, lp++, dp++)
+   for (lp = png_ptr->row_buf + 1; i < row_bytes;)
    {
-      v = *dp = (png_byte)(((int)*rp - (int)*lp) & 0xff);
-#ifdef PNG_USE_ABS
-      sum += 128 - abs((int)v - 128);
-#else
-      sum += (v < 128) ? v : 256 - v;
-#endif
+      size_t stop = row_bytes - i > PNG_FILTER_SCORE_CHUNK ?
+         i + PNG_FILTER_SCORE_CHUNK : row_bytes;
+      unsigned int csum = 0;
+
+      for (; i < stop; i++, rp++, lp++, dp++)
+      {
+         v = *dp = (png_byte)(((int)*rp - (int)*lp) & 0xff);
+         csum += png_filter_score(v);
+      }
+
+      sum += csum;
 
       if (sum > lmins)  /* We are already worse, don't continue. */
         break;
@@ -2447,16 +2467,23 @@ png_setup_up_row(png_struct *png_ptr, size_t row_bytes, size_t lmins)
 
    png_ptr->try_row[0] = PNG_FILTER_VALUE_UP;
 
-   for (i = 0, rp = png_ptr->row_buf + 1, dp = png_ptr->try_row + 1,
-       pp = png_ptr->prev_row + 1; i < row_bytes;
-       i++, rp++, pp++, dp++)
+   rp = png_ptr->row_buf + 1;
+   dp = png_ptr->try_row + 1;
+   pp = png_ptr->prev_row + 1;
+
+   for (i = 0; i < row_bytes;)
    {
-      v = *dp = (png_byte)(((int)*rp - (int)*pp) & 0xff);
-#ifdef PNG_USE_ABS
-      sum += 128 - abs((int)v - 128);
-#else
-      sum += (v < 128) ? v : 256 - v;
-#endif
+      size_t stop = row_bytes - i > PNG_FILTER_SCORE_CHUNK ?
+         i + PNG_FILTER_SCORE_CHUNK : row_bytes;
+      unsigned int csum = 0;
+
+      for (; i < stop; i++, rp++, pp++, dp++)
+      {
+         v = *dp = (png_byte)(((int)*rp - (int)*pp) & 0xff);
+         csum += png_filter_score(v);
+      }
+
+      sum += csum;
 
       if (sum > lmins)  /* We are already worse, don't continue. */
         break;
@@ -2496,23 +2523,24 @@ png_setup_avg_row(png_struct *png_ptr, png_uint_32 bpp,
    {
       v = *dp++ = (png_byte)(((int)*rp++ - ((int)*pp++ / 2)) & 0xff);
 
-#ifdef PNG_USE_ABS
-      sum += 128 - abs((int)v - 128);
-#else
-      sum += (v < 128) ? v : 256 - v;
-#endif
+      sum += png_filter_score(v);
    }
 
-   for (lp = png_ptr->row_buf + 1; i < row_bytes; i++)
+   for (lp = png_ptr->row_buf + 1; i < row_bytes;)
    {
-      v = *dp++ = (png_byte)(((int)*rp++ - (((int)*pp++ + (int)*lp++) / 2))
-          & 0xff);
+      size_t stop = row_bytes - i > PNG_FILTER_SCORE_CHUNK ?
+         i + PNG_FILTER_SCORE_CHUNK : row_bytes;
+      unsigned int csum = 0;
 
-#ifdef PNG_USE_ABS
-      sum += 128 - abs((int)v - 128);
-#else
-      sum += (v < 128) ? v : 256 - v;
-#endif
+      for (; i < stop; i++)
+      {
+         v = *dp++ = (png_byte)(((int)*rp++ - (((int)*pp++ + (int)*lp++) / 2))
+             & 0xff);
+
+         csum += png_filter_score(v);
+      }
+
+      sum += csum;
 
       if (sum > lmins)  /* We are already worse, don't continue. */
         break;
@@ -2558,44 +2586,44 @@ png_setup_paeth_row(png_struct *png_ptr, png_uint_32 bpp,
    {
       v = *dp++ = (png_byte)(((int)*rp++ - (int)*pp++) & 0xff);
 
-#ifdef PNG_USE_ABS
-      sum += 128 - abs((int)v - 128);
-#else
-      sum += (v < 128) ? v : 256 - v;
-#endif
+      sum += png_filter_score(v);
    }
 
-   for (lp = png_ptr->row_buf + 1, cp = png_ptr->prev_row + 1; i < row_bytes;
-        i++)
+   for (lp = png_ptr->row_buf + 1, cp = png_ptr->prev_row + 1; i < row_bytes;)
    {
-      int a, b, c, pa, pb, pc, p;
+      size_t stop = row_bytes - i > PNG_FILTER_SCORE_CHUNK ?
+         i + PNG_FILTER_SCORE_CHUNK : row_bytes;
+      unsigned int csum = 0;
 
-      b = *pp++;
-      c = *cp++;
-      a = *lp++;
+      for (; i < stop; i++)
+      {
+         int a, b, c, pa, pb, pc, p;
 
-      p = b - c;
-      pc = a - c;
+         b = *pp++;
+         c = *cp++;
+         a = *lp++;
 
-#ifdef PNG_USE_ABS
-      pa = abs(p);
-      pb = abs(pc);
-      pc = abs(p + pc);
-#else
-      pa = p < 0 ? -p : p;
-      pb = pc < 0 ? -pc : pc;
-      pc = (p + pc) < 0 ? -(p + pc) : p + pc;
-#endif
-
-      p = (pa <= pb && pa <=pc) ? a : (pb <= pc) ? b : c;
-
-      v = *dp++ = (png_byte)(((int)*rp++ - p) & 0xff);
+         p = b - c;
+         pc = a - c;
 
 #ifdef PNG_USE_ABS
-      sum += 128 - abs((int)v - 128);
+         pa = abs(p);
+         pb = abs(pc);
+         pc = abs(p + pc);
 #else
-      sum += (v < 128) ? v : 256 - v;
+         pa = p < 0 ? -p : p;
+         pb = pc < 0 ? -pc : pc;
+         pc = (p + pc) < 0 ? -(p + pc) : p + pc;
 #endif
+
+         p = (pa <= pb && pa <=pc) ? a : (pb <= pc) ? b : c;
+
+         v = *dp++ = (png_byte)(((int)*rp++ - p) & 0xff);
+
+         csum += png_filter_score(v);
+      }
+
+      sum += csum;
 
       if (sum > lmins)  /* We are already worse, don't continue. */
         break;
@@ -2716,16 +2744,19 @@ png_write_find_filter(png_struct *png_ptr, png_row_info *row_info)
       size_t i;
       unsigned int v;
 
+      for (i = 0, rp = row_buf + 1; i < row_bytes;)
       {
-         for (i = 0, rp = row_buf + 1; i < row_bytes; i++, rp++)
+         size_t stop = row_bytes - i > PNG_FILTER_SCORE_CHUNK ?
+            i + PNG_FILTER_SCORE_CHUNK : row_bytes;
+         unsigned int csum = 0;
+
+         for (; i < stop; i++, rp++)
          {
             v = *rp;
-#ifdef PNG_USE_ABS
-            sum += 128 - abs((int)v - 128);
-#else
-            sum += (v < 128) ? v : 256 - v;
-#endif
+            csum += png_filter_score(v);
          }
+
+         sum += csum;
       }
 
       mins = sum;
