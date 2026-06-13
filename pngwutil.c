@@ -1279,6 +1279,8 @@ png_zt_eligible(png_struct *png_ptr, int flush)
 #endif
    if ((png_ptr->mode & PNG_HAVE_IDAT) != 0)
       return 0;                                  /* not at the stream head */
+   if (png_image_size(png_ptr) < PNG_ZT_MIN_BYTES)
+      return 0;                                  /* too small to be worth threading */
    return png_zt_thread_count(png_ptr) > 1;
 }
 

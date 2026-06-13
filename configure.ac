@@ -201,6 +201,18 @@ AS_IF([test "x$use_libdeflate" != "xno"],
      [AC_MSG_ERROR([--with-libdeflate: libdeflate (1.10+) not found])])
    CPPFLAGS="$CPPFLAGS -DPNG_USE_LIBDEFLATE"])
 
+# Multithreaded IDAT compression on plain zlib (bounded memory; opt-in at run
+# time via png_set_compression_threads / PNG_DEFLATE_THREADS).
+AC_ARG_ENABLE(threaded-write,
+   AS_HELP_STRING([[[--enable-threaded-write]]],
+      [compress IDAT with multiple threads (requires POSIX threads)]),
+      [use_threaded_write=${enableval}],
+      [use_threaded_write=no])
+AS_IF([test "x$use_threaded_write" != "xno"],
+  [AC_CHECK_LIB([pthread], [pthread_create], ,
+     [AC_MSG_ERROR([--enable-threaded-write: pthreads not found])])
+   CPPFLAGS="$CPPFLAGS -DPNG_THREADED_WRITE_SUPPORTED"])
+
 # The following is for pngvalid, to ensure it catches FP errors even on
 # platforms that don't enable FP exceptions, the function appears in the math
 # library (typically), it's not an error if it is not found.

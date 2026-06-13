@@ -156,6 +156,19 @@ if(PNG_LIBDEFLATE)
   list(APPEND PNG_LINK_LIBRARIES ${LIBDEFLATE_LIBRARY})
 endif()
 
+option(PNG_THREADED_WRITE
+       "Multithreaded IDAT compression on plain zlib (bounded memory; opt-in\
+ at run time via png_set_compression_threads / PNG_DEFLATE_THREADS)" OFF)
+if(PNG_THREADED_WRITE)
+  set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+  find_package(Threads REQUIRED)
+  if(NOT CMAKE_USE_PTHREADS_INIT)
+    message(FATAL_ERROR "PNG_THREADED_WRITE requires POSIX threads")
+  endif()
+  add_definitions(-DPNG_THREADED_WRITE_SUPPORTED)
+  list(APPEND PNG_LINK_LIBRARIES Threads::Threads)
+endif()
+
 # Find the math library (unless we already know it's not available or
 # not needed).
 if(UNIX AND NOT (APPLE OR BEOS OR HAIKU OR EMSCRIPTEN))
