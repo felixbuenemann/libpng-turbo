@@ -1170,8 +1170,6 @@ png_zt_append(png_struct *png_ptr, png_zt_ctx *z, const png_byte *data,
    }
 }
 
-static void png_zt_free(png_struct *png_ptr); /* fwd */
-
 /* Flush the last chunk (final), drain all output in order, join workers.
  * Sets png_ptr->zt_err if a worker failed so the caller can png_error after
  * the context is torn down.
@@ -1213,7 +1211,7 @@ png_zt_finish(png_struct *png_ptr, png_zt_ctx *z)
    }
 }
 
-static void
+void /* PRIVATE */
 png_zt_free(png_struct *png_ptr)
 {
    png_zt_ctx *z = (png_zt_ctx *)png_ptr->zt_ctx;

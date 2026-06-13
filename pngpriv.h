@@ -1073,6 +1073,13 @@ PNG_INTERNAL_FUNCTION(void, png_compress_IDAT,
     const png_byte *row_data, png_alloc_size_t row_data_length, int flush),
    PNG_EMPTY);
 
+#ifdef PNG_THREADED_WRITE_SUPPORTED
+/* Join the threaded-IDAT workers and free the context, if any.  Called at
+ * normal finish and from the write-destroy path so a png_error/longjmp during
+ * the write tears the worker pool down cleanly. */
+PNG_INTERNAL_FUNCTION(void, png_zt_free, (png_struct *png_ptr), PNG_EMPTY);
+#endif
+
 PNG_INTERNAL_FUNCTION(void, png_write_IEND,
    (png_struct *png_ptr),
    PNG_EMPTY);

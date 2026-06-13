@@ -1008,6 +1008,13 @@ png_write_destroy(png_struct *png_ptr)
 {
    png_debug(1, "in png_write_destroy");
 
+#ifdef PNG_THREADED_WRITE_SUPPORTED
+   /* Join + free the threaded-IDAT workers first.  On a png_error/longjmp
+    * mid-write the worker pool is still live; this tears it down cleanly
+    * (idempotent: no-op when not threading). */
+   png_zt_free(png_ptr);
+#endif
+
    /* Free any memory zlib uses */
    if ((png_ptr->flags & PNG_FLAG_ZSTREAM_INITIALIZED) != 0)
       deflateEnd(&png_ptr->zstream);
