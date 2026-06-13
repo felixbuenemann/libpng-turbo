@@ -154,6 +154,10 @@ struct png_struct_def
    png_compression_buffer *zbuffer_list; /* Created on demand during write */
    uInt                    zbuffer_size; /* size of the actual buffer */
 
+#ifdef PNG_THREADED_WRITE_SUPPORTED
+   png_voidp               zt_ctx;       /* threaded IDAT encoder ctx, or NULL */
+#endif
+
    int zlib_level;            /* holds zlib compression level */
    int zlib_method;           /* holds zlib compression method */
    int zlib_window_bits;      /* holds zlib compression window bits */

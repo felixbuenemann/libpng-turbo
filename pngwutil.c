@@ -933,10 +933,438 @@ png_write_PLTE(png_struct *png_ptr, const png_color *palette,
  * checking and (at the end) clearing png_ptr->zowner; it does some sanity
  * checks on the 'mode' flags while doing this.
  */
+#ifdef PNG_THREADED_WRITE_SUPPORTED
+/* Multithreaded IDAT compression on plain zlib, pigz-style and streaming:
+ * filtered rows are accumulated into a bounded ring of fixed-size chunks; a
+ * pool of worker threads deflates each chunk independently into raw deflate
+ * blocks ending on a byte boundary (Z_SYNC_FLUSH, Z_FINISH for the last), and
+ * the byte-aligned pieces concatenate into one valid zlib stream behind a
+ * hand-written header + adler32 trailer.  Each chunk presets the previous 32K
+ * of input as its zlib dictionary, so the ratio is virtually identical to a
+ * single stream (cost: one 5-byte sync marker per chunk).
+ *
+ * Peak memory is bounded by the ring (W chunks), independent of image size.
+ * Workers only touch their slot; they never call into png_ptr or png_error
+ * (no longjmp across threads) -- they set an error flag the main thread
+ * reports.  All emission (writing IDAT) happens on the main thread.
+ */
+#include <pthread.h>
+#include <unistd.h>
+#include <stdlib.h>
+
+#define PNG_ZT_CHUNK  (256U*1024U)            /* per-chunk filtered bytes */
+#define PNG_ZT_DICT   (32U*1024U)             /* zlib window / carried dict */
+#define PNG_ZT_OUTCAP (PNG_ZT_CHUNK + (PNG_ZT_CHUNK>>9) + 128) /* > raw bound */
+#define PNG_ZT_MIN_BYTES (1024U*1024U)        /* don't thread below this */
+
+/* Write pre-compressed bytes out as IDAT chunk(s) of the configured buffer
+ * size, matching the streaming path's chunking. */
+static void
+png_compress_IDAT_emit(png_struct *png_ptr, const png_byte *data,
+    png_alloc_size_t size)
+{
+   while (size > 0)
+   {
+      size_t len = png_ptr->zbuffer_size;
+      if (len > size)
+         len = (size_t)size;
+      png_write_complete_chunk(png_ptr, png_IDAT, data, len);
+      png_ptr->mode |= PNG_HAVE_IDAT;
+      data += len;
+      size -= len;
+   }
+}
+
+enum { PNG_ZT_FREE = 0, PNG_ZT_READY, PNG_ZT_BUSY, PNG_ZT_DONE };
+
+typedef struct
+{
+   png_byte *in;          /* PNG_ZT_CHUNK */
+   png_byte *out;         /* PNG_ZT_OUTCAP */
+   png_byte *dict;        /* PNG_ZT_DICT, copied from prev chunk's tail */
+   size_t    in_len, out_len;
+   unsigned  dict_len;
+   uLong     adler;
+   int       final;
+   int       err;
+   int       state;
+} png_zt_slot;
+
+typedef struct png_zt_ctx
+{
+   png_zt_slot *slot;
+   int W, nthreads, nstarted;
+   int level, mem_level, strategy;
+   pthread_t *tid;
+   pthread_mutex_t mx;
+   pthread_cond_t  cv;
+   int producing_done, aborted;
+   /* producer + emitter both run on the main thread */
+   png_alloc_size_t fill_idx;   /* global index of the chunk being filled */
+   size_t           fill;       /* bytes in slot[fill_idx % W].in (== CHUNK when held full) */
+   png_alloc_size_t emit_idx;   /* next chunk to emit, in order */
+   uLong            adler;      /* running adler32 of the whole image */
+   int              header_done;
+   png_byte         carry[PNG_ZT_DICT];
+   unsigned         carry_len;
+} png_zt_ctx;
+
+static void *
+png_zt_worker(void *arg)
+{
+   png_zt_ctx *z = (png_zt_ctx *)arg;
+
+   for (;;)
+   {
+      png_zt_slot *c = NULL;
+      int i;
+
+      pthread_mutex_lock(&z->mx);
+      for (;;)
+      {
+         if (z->aborted) { pthread_mutex_unlock(&z->mx); return NULL; }
+         for (i = 0; i < z->W; i++)
+            if (z->slot[i].state == PNG_ZT_READY) { c = &z->slot[i]; break; }
+         if (c != NULL) { c->state = PNG_ZT_BUSY; break; }
+         if (z->producing_done) { pthread_mutex_unlock(&z->mx); return NULL; }
+         pthread_cond_wait(&z->cv, &z->mx);
+      }
+      pthread_mutex_unlock(&z->mx);
+
+      {
+         z_stream zs;
+         int ok, ret;
+         memset(&zs, 0, sizeof zs);
+         ok = (deflateInit2(&zs, z->level, Z_DEFLATED, -15, z->mem_level,
+                   z->strategy) == Z_OK);
+         if (ok)
+         {
+            if (c->dict_len != 0)
+               (void)deflateSetDictionary(&zs, c->dict, c->dict_len);
+            zs.next_in = c->in;  zs.avail_in = (uInt)c->in_len;
+            zs.next_out = c->out; zs.avail_out = (uInt)PNG_ZT_OUTCAP;
+            ret = deflate(&zs, c->final ? Z_FINISH : Z_SYNC_FLUSH);
+            if ((c->final ? ret != Z_STREAM_END : ret != Z_OK) || zs.avail_in != 0)
+               ok = 0;
+            c->out_len = (size_t)(PNG_ZT_OUTCAP - zs.avail_out);
+            c->adler = adler32(adler32(0, NULL, 0), c->in, (uInt)c->in_len);
+            (void)deflateEnd(&zs);
+         }
+         pthread_mutex_lock(&z->mx);
+         c->err = !ok;
+         c->state = PNG_ZT_DONE;
+         pthread_cond_broadcast(&z->cv);
+         pthread_mutex_unlock(&z->mx);
+      }
+   }
+}
+
+/* Emit one completed (DONE) head chunk in order; does the IDAT I/O on the
+ * main thread without the lock held.  Returns 0 on a recorded worker error.
+ */
+static int
+png_zt_emit_head(png_struct *png_ptr, png_zt_ctx *z)
+{
+   png_zt_slot *c = &z->slot[z->emit_idx % z->W];
+
+   if (c->err) { z->aborted = 1; return 0; }
+
+   if (!z->header_done)
+   {
+      png_byte hdr[2]; hdr[0] = 0x78; hdr[1] = 0x9c; /* CM=8 CINFO=7, default */
+      png_compress_IDAT_emit(png_ptr, hdr, 2);
+      z->header_done = 1;
+   }
+   png_compress_IDAT_emit(png_ptr, c->out, c->out_len);
+   z->adler = adler32_combine(z->adler, c->adler, (z_off_t)c->in_len);
+   if (c->final)
+   {
+      png_byte tail[4];
+      png_save_uint_32(tail, (png_uint_32)z->adler);
+      png_compress_IDAT_emit(png_ptr, tail, 4);
+   }
+   return 1;
+}
+
+/* Block until slot s is FREE (i.e. emitted), draining/emitting head chunks as
+ * they complete.  Drives back-pressure: at most W chunks are ever in flight.
+ */
+static void
+png_zt_wait_free(png_struct *png_ptr, png_zt_ctx *z, int s)
+{
+   pthread_mutex_lock(&z->mx);
+   while (z->slot[s].state != PNG_ZT_FREE && !z->aborted)
+   {
+      int h = (int)(z->emit_idx % z->W);
+      if (z->slot[h].state == PNG_ZT_DONE)
+      {
+         int ok;
+         pthread_mutex_unlock(&z->mx);
+         ok = png_zt_emit_head(png_ptr, z);   /* I/O without the lock */
+         pthread_mutex_lock(&z->mx);
+         if (!ok) { z->aborted = 1; pthread_cond_broadcast(&z->cv); break; }
+         z->slot[h].state = PNG_ZT_FREE;
+         z->emit_idx++;
+         pthread_cond_broadcast(&z->cv);
+      }
+      else
+         pthread_cond_wait(&z->cv, &z->mx);
+   }
+   pthread_mutex_unlock(&z->mx);
+}
+
+static void
+png_zt_dispatch(png_zt_ctx *z, int s, size_t len, int final)
+{
+   pthread_mutex_lock(&z->mx);
+   z->slot[s].in_len = len;
+   z->slot[s].final = final;
+   z->slot[s].err = 0;
+   z->slot[s].state = PNG_ZT_READY;
+   pthread_cond_broadcast(&z->cv);
+   pthread_mutex_unlock(&z->mx);
+}
+
+/* Append filtered bytes to the ring.  A full chunk is held (not dispatched)
+ * until either more data arrives (then dispatched non-final) or finish (then
+ * dispatched final) -- a one-chunk lookahead that fixes the final flag without
+ * knowing the total size, so it works for interlaced images too.
+ */
+static void
+png_zt_append(png_struct *png_ptr, png_zt_ctx *z, const png_byte *data,
+    png_alloc_size_t len)
+{
+   while (len > 0 && !z->aborted)
+   {
+      int s = (int)(z->fill_idx % z->W);
+      size_t space, n;
+
+      if (z->fill == PNG_ZT_CHUNK)
+      {
+         /* a previously-filled chunk is held; more data proves it isn't last */
+         png_zt_dispatch(z, s, PNG_ZT_CHUNK, 0);
+         z->fill_idx++;
+         z->fill = 0;
+         s = (int)(z->fill_idx % z->W);
+      }
+      if (z->fill == 0)
+      {
+         png_zt_wait_free(png_ptr, z, s);     /* back-pressure */
+         if (z->aborted) break;
+         z->slot[s].dict_len = z->carry_len;
+         if (z->carry_len != 0)
+            memcpy(z->slot[s].dict, z->carry, z->carry_len);
+      }
+      space = PNG_ZT_CHUNK - z->fill;
+      n = ((size_t)len < space) ? (size_t)len : space;
+      memcpy(z->slot[s].in + z->fill, data, n);
+      z->fill += n;
+      data += n;
+      len -= n;
+      if (z->fill == PNG_ZT_CHUNK)
+      {
+         z->carry_len = PNG_ZT_DICT;
+         memcpy(z->carry, z->slot[s].in + PNG_ZT_CHUNK - PNG_ZT_DICT,
+             PNG_ZT_DICT);
+      }
+   }
+}
+
+static void png_zt_free(png_struct *png_ptr); /* fwd */
+
+/* Flush the last chunk (final), drain all output in order, join workers.
+ * Sets png_ptr->zt_err if a worker failed so the caller can png_error after
+ * the context is torn down.
+ */
+static void
+png_zt_finish(png_struct *png_ptr, png_zt_ctx *z)
+{
+   int s = (int)(z->fill_idx % z->W);
+
+   if (z->fill > 0)
+      png_zt_dispatch(z, s, z->fill, 1);       /* last chunk: final */
+   else if (z->fill_idx == 0)
+   {
+      /* no data at all: emit an empty zlib stream (header + final empty block) */
+      if (z->carry_len == 0)
+         png_zt_dispatch(z, s, 0, 1);
+   }
+
+   pthread_mutex_lock(&z->mx);
+   z->producing_done = 1;
+   pthread_cond_broadcast(&z->cv);
+   pthread_mutex_unlock(&z->mx);
+
+   /* emit everything still in flight, in order */
+   while (z->emit_idx < z->fill_idx + 1 && !z->aborted)
+   {
+      int h = (int)(z->emit_idx % z->W);
+      pthread_mutex_lock(&z->mx);
+      while (z->slot[h].state != PNG_ZT_DONE && !z->aborted)
+         pthread_cond_wait(&z->cv, &z->mx);
+      pthread_mutex_unlock(&z->mx);
+      if (z->aborted) break;
+      if (!png_zt_emit_head(png_ptr, z)) break;
+      pthread_mutex_lock(&z->mx);
+      z->slot[h].state = PNG_ZT_FREE;
+      z->emit_idx++;
+      pthread_cond_broadcast(&z->cv);
+      pthread_mutex_unlock(&z->mx);
+   }
+}
+
+static void
+png_zt_free(png_struct *png_ptr)
+{
+   png_zt_ctx *z = (png_zt_ctx *)png_ptr->zt_ctx;
+   int i;
+
+   if (z == NULL)
+      return;
+
+   pthread_mutex_lock(&z->mx);
+   z->aborted = 1;            /* unblock workers if we're tearing down early */
+   z->producing_done = 1;
+   pthread_cond_broadcast(&z->cv);
+   pthread_mutex_unlock(&z->mx);
+
+   for (i = 0; i < z->nstarted; i++)
+      (void)pthread_join(z->tid[i], NULL);
+
+   pthread_mutex_destroy(&z->mx);
+   pthread_cond_destroy(&z->cv);
+
+   if (z->slot != NULL)
+      for (i = 0; i < z->W; i++)
+      {
+         png_free(png_ptr, z->slot[i].in);
+         png_free(png_ptr, z->slot[i].out);
+         png_free(png_ptr, z->slot[i].dict);
+      }
+   png_free(png_ptr, z->slot);
+   png_free(png_ptr, z->tid);
+   png_free(png_ptr, z);
+   png_ptr->zt_ctx = NULL;
+}
+
+/* How many threads to use, 1 meaning "don't thread".  Opt-in: the count comes
+ * from the application (TODO: png_set_compression_threads) or the
+ * PNG_DEFLATE_THREADS environment override; default 1 (no threads). */
+static int
+png_zt_thread_count(png_struct *png_ptr)
+{
+   const char *env = getenv("PNG_DEFLATE_THREADS");
+   long n = 1;
+
+   if (env != NULL)
+      n = atol(env);
+   if (n < 1) n = 1;
+   if (n > 64) n = 64;
+   PNG_UNUSED(png_ptr)
+   return (int)n;
+}
+
+/* Eligible to thread this IDAT?  Only the main image, no interval flushing,
+ * starting at the head of the stream. */
+static int
+png_zt_eligible(png_struct *png_ptr, int flush)
+{
+   if (flush != Z_NO_FLUSH && flush != Z_FINISH)
+      return 0;                                  /* png_write_flush in use */
+#ifdef PNG_WRITE_FLUSH_SUPPORTED
+   if (png_ptr->flush_dist != 0)
+      return 0;
+#endif
+#ifdef PNG_WRITE_APNG_SUPPORTED
+   if (png_ptr->num_frames_written != 0)
+      return 0;                                  /* fdAT frames use zlib */
+#endif
+   if ((png_ptr->mode & PNG_HAVE_IDAT) != 0)
+      return 0;                                  /* not at the stream head */
+   return png_zt_thread_count(png_ptr) > 1;
+}
+
+static void
+png_zt_start(png_struct *png_ptr)
+{
+   png_zt_ctx *z = png_voidcast(png_zt_ctx *,
+       png_malloc(png_ptr, sizeof *z));
+   int i, t;
+
+   memset(z, 0, sizeof *z);
+   z->nthreads = png_zt_thread_count(png_ptr);
+   z->W = z->nthreads + 2;                       /* small bounded ring */
+   z->level = png_ptr->zlib_level < 0 ? 6 : png_ptr->zlib_level;
+   z->mem_level = png_ptr->zlib_mem_level;
+   if ((png_ptr->flags & PNG_FLAG_ZLIB_CUSTOM_STRATEGY) != 0)
+      z->strategy = png_ptr->zlib_strategy;
+   else if (png_ptr->do_filter != PNG_FILTER_NONE)
+      z->strategy = PNG_Z_DEFAULT_STRATEGY;
+   else
+      z->strategy = PNG_Z_DEFAULT_NOFILTER_STRATEGY;
+
+   pthread_mutex_init(&z->mx, NULL);
+   pthread_cond_init(&z->cv, NULL);
+   z->adler = adler32(0, NULL, 0);
+
+   z->slot = png_voidcast(png_zt_slot *,
+       png_malloc(png_ptr, (png_alloc_size_t)z->W * sizeof *z->slot));
+   memset(z->slot, 0, (size_t)z->W * sizeof *z->slot);
+   for (i = 0; i < z->W; i++)
+   {
+      z->slot[i].in   = png_voidcast(png_byte *, png_malloc(png_ptr, PNG_ZT_CHUNK));
+      z->slot[i].out  = png_voidcast(png_byte *, png_malloc(png_ptr, PNG_ZT_OUTCAP));
+      z->slot[i].dict = png_voidcast(png_byte *, png_malloc(png_ptr, PNG_ZT_DICT));
+      z->slot[i].state = PNG_ZT_FREE;
+   }
+   z->tid = png_voidcast(pthread_t *,
+       png_malloc(png_ptr, (png_alloc_size_t)z->nthreads * sizeof *z->tid));
+
+   png_ptr->zt_ctx = z;
+   for (t = 0; t < z->nthreads; t++)
+      if (pthread_create(&z->tid[t], NULL, png_zt_worker, z) != 0)
+         break;
+   z->nstarted = t;
+   if (z->nstarted == 0)
+   {
+      /* couldn't spawn any worker: fall back by failing eligibility cleanly */
+      png_zt_free(png_ptr);
+   }
+}
+#endif /* PNG_THREADED_WRITE_SUPPORTED */
+
 void /* PRIVATE */
 png_compress_IDAT(png_struct *png_ptr, const png_byte *input,
     png_alloc_size_t input_len, int flush)
 {
+#ifdef PNG_THREADED_WRITE_SUPPORTED
+   if (png_ptr->zt_ctx != NULL ||
+       (png_ptr->zowner != png_IDAT && png_zt_eligible(png_ptr, flush)))
+   {
+      if (png_ptr->zt_ctx == NULL)
+      {
+         png_zt_start(png_ptr);
+         png_ptr->mode |= PNG_HAVE_IDAT;          /* claim the stream */
+      }
+
+      if (png_ptr->zt_ctx != NULL)                /* start may have failed */
+      {
+         png_zt_ctx *z = (png_zt_ctx *)png_ptr->zt_ctx;
+         png_zt_append(png_ptr, z, input, input_len);
+         if (flush == Z_FINISH)
+         {
+            int failed;
+            png_zt_finish(png_ptr, z);
+            failed = z->aborted;
+            png_zt_free(png_ptr);
+            if (failed)
+               png_error(png_ptr, "threaded IDAT compression failed");
+         }
+         return;
+      }
+   }
+#endif /* PNG_THREADED_WRITE_SUPPORTED */
+
    if (png_ptr->zowner != png_IDAT)
    {
       /* First time.   Ensure we have a temporary buffer for compression and
