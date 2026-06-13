@@ -13,6 +13,19 @@
  * libpng itself during the course of writing an image.
  */
 
+/* The threaded-write processor-count query, sysconf(_SC_NPROCESSORS_ONLN),
+ * lives outside the strict-POSIX namespace that pngpriv.h selects via
+ * _POSIX_SOURCE.  Opt into the platform extension namespace here, before any
+ * header is included, so it is visible.  (Harmless when threaded write is off.)
+ */
+#if defined(__APPLE__)
+#  define _DARWIN_C_SOURCE 1
+#elif defined(__GLIBC__) || defined(__linux__)
+#  ifndef _DEFAULT_SOURCE
+#    define _DEFAULT_SOURCE 1
+#  endif
+#endif
+
 #include "pngpriv.h"
 
 #ifdef PNG_WRITE_SUPPORTED
@@ -951,6 +964,9 @@ png_write_PLTE(png_struct *png_ptr, const png_color *palette,
 #include <pthread.h>
 #include <unistd.h>
 #include <stdlib.h>
+#if defined(_WIN32)
+#  include <windows.h>
+#endif
 
 #define PNG_ZT_CHUNK  (256U*1024U)            /* per-chunk filtered bytes */
 #define PNG_ZT_DICT   (32U*1024U)             /* zlib window / carried dict */
@@ -1245,17 +1261,36 @@ png_zt_free(png_struct *png_ptr)
    png_ptr->zt_ctx = NULL;
 }
 
-/* How many threads to use, 1 meaning "don't thread".  Opt-in: the count comes
- * from the application (TODO: png_set_compression_threads) or the
- * PNG_DEFLATE_THREADS environment override; default 1 (no threads). */
+/* Number of online processors, portably; 1 if it can't be determined. */
+static int
+png_zt_nprocs(void)
+{
+#if defined(_WIN32)
+   SYSTEM_INFO si;
+   GetSystemInfo(&si);
+   return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+#elif defined(_SC_NPROCESSORS_ONLN)
+   long n = sysconf(_SC_NPROCESSORS_ONLN);
+   return n > 0 ? (int)n : 1;
+#else
+   return 1;   /* unknown platform: caller still threads if env/API asks */
+#endif
+}
+
+/* How many threads to use, 1 meaning "don't thread".  Default: auto-scale to
+ * the processor count, so the speedup needs no API call.  The
+ * PNG_DEFLATE_THREADS environment variable overrides it (set to 1 to disable);
+ * an application setter can be added later for the same effect. */
 static int
 png_zt_thread_count(png_struct *png_ptr)
 {
    const char *env = getenv("PNG_DEFLATE_THREADS");
-   long n = 1;
+   long n;
 
-   if (env != NULL)
-      n = atol(env);
+   if (env != NULL && *env != '\0')
+      n = atol(env);               /* explicit override (1 disables) */
+   else
+      n = png_zt_nprocs();         /* default: scale to CPUs */
    if (n < 1) n = 1;
    if (n > 64) n = 64;
    PNG_UNUSED(png_ptr)
